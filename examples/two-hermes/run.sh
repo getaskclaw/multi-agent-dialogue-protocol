@@ -8,20 +8,9 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 export PATH="$ROOT/examples/fakes/bin:$PATH"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
-DIALOGUE="${1:-$(mktemp -d)/dialogue}"
+source "$ROOT/examples/demo-common.sh"
 madp() { python3 -m multi_agent_dialogue "$@"; }
-
-# Every dialogue transition is a local Git commit, so the dialogue must
-# live inside a Git worktree. The default is an isolated throwaway repo
-# with a repo-local identity; global Git config is never touched.
-REPO_DIR="$(dirname "$DIALOGUE")"
-mkdir -p "$REPO_DIR"
-if ! git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-  echo "== create isolated example Git repo (repo-local identity) =="
-  git init -q "$REPO_DIR"
-  git -C "$REPO_DIR" config user.name "madp-example"
-  git -C "$REPO_DIR" config user.email "madp-example@example.invalid"
-fi
+madp_example_init_repo "$@"
 
 echo "== init =="
 madp init --definition "$HERE/protocol.json" --dialogue "$DIALOGUE"
@@ -29,10 +18,8 @@ madp init --definition "$HERE/protocol.json" --dialogue "$DIALOGUE"
 echo "== dry run: packet only, no process starts =="
 madp run "$DIALOGUE" --actor hermes-north
 
-echo "== wrong-actor claim is rejected (expected failure) =="
-if madp claim "$DIALOGUE" --actor hermes-south; then
-  echo "ERROR: hermes-south claimed hermes-north's turn"; exit 1
-fi
+echo "== wrong-actor production launch is rejected without a spawn =="
+madp_example_assert_wrong_actor hermes-south hermes-north R01
 
 echo "== four launches, one turn each =="
 for actor in hermes-north hermes-south hermes-north hermes-south; do

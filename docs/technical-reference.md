@@ -384,7 +384,6 @@ schemas/                    protocol + runtime-evidence JSON Schemas
 examples/                   two-claude, two-hermes, three-mixed + fake runtimes
 tests/                      unit + CLI + end-to-end topology proofs
 scripts/verify.py           full verification gate
-docs/plans/                 the implementation plan this repo was built from
 ```
 
 A dialogue directory contains `definition.json` (frozen copy),

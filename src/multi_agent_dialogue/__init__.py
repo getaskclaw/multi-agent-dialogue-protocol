@@ -10,4 +10,4 @@ The core separates six facts that are often conflated:
 - session evidence: the machine-readable record captured for each turn.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
