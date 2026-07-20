@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,27 @@ EXAMPLE_NAMES = ("two-hermes", "two-claude", "three-mixed")
 EXAMPLES = support.REPO_ROOT / "examples"
 
 
+def _selected_python_bin(executable: str) -> str:
+    return str(Path(executable).parent)
+
+
+class InterpreterSelectionTests(unittest.TestCase):
+    def test_virtualenv_symlink_keeps_virtualenv_bin_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_python = root / "base" / "python3"
+            selected_python = root / "venv" / "bin" / "python3"
+            base_python.parent.mkdir(parents=True)
+            selected_python.parent.mkdir(parents=True)
+            base_python.touch()
+            selected_python.symlink_to(base_python)
+
+            self.assertEqual(
+                _selected_python_bin(str(selected_python)),
+                str(selected_python.parent),
+            )
+
+
 class ExampleScriptSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -24,7 +46,13 @@ class ExampleScriptSafetyTests(unittest.TestCase):
         cls.parents: dict[str, Path] = {}
         clean_env = dict(os.environ)
         clean_env.pop("PYTHONPATH", None)
-        clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        selected_python_bin = _selected_python_bin(sys.executable)
+        clean_env["PATH"] = os.pathsep.join(
+            [
+                selected_python_bin,
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            ]
+        )
         for name in EXAMPLE_NAMES:
             parent = Path(cls._tmp.name) / name
             root = parent / "chosen-root"
