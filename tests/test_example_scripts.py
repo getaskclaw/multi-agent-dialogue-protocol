@@ -16,6 +16,27 @@ EXAMPLE_NAMES = ("two-hermes", "two-claude", "three-mixed")
 EXAMPLES = support.REPO_ROOT / "examples"
 
 
+def _selected_python_bin(executable: str) -> str:
+    return str(Path(executable).parent)
+
+
+class InterpreterSelectionTests(unittest.TestCase):
+    def test_virtualenv_symlink_keeps_virtualenv_bin_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_python = root / "base" / "python3"
+            selected_python = root / "venv" / "bin" / "python3"
+            base_python.parent.mkdir(parents=True)
+            selected_python.parent.mkdir(parents=True)
+            base_python.touch()
+            selected_python.symlink_to(base_python)
+
+            self.assertEqual(
+                _selected_python_bin(str(selected_python)),
+                str(selected_python.parent),
+            )
+
+
 class ExampleScriptSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -25,7 +46,7 @@ class ExampleScriptSafetyTests(unittest.TestCase):
         cls.parents: dict[str, Path] = {}
         clean_env = dict(os.environ)
         clean_env.pop("PYTHONPATH", None)
-        selected_python_bin = str(Path(sys.executable).resolve().parent)
+        selected_python_bin = _selected_python_bin(sys.executable)
         clean_env["PATH"] = os.pathsep.join(
             [
                 selected_python_bin,
