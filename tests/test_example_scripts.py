@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,13 @@ class ExampleScriptSafetyTests(unittest.TestCase):
         cls.parents: dict[str, Path] = {}
         clean_env = dict(os.environ)
         clean_env.pop("PYTHONPATH", None)
-        clean_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        selected_python_bin = str(Path(sys.executable).resolve().parent)
+        clean_env["PATH"] = os.pathsep.join(
+            [
+                selected_python_bin,
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            ]
+        )
         for name in EXAMPLE_NAMES:
             parent = Path(cls._tmp.name) / name
             root = parent / "chosen-root"
