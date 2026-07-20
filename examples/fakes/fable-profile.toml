@@ -1,0 +1,8 @@
+# Safe, public profile fixture used only by deterministic fake-runtime examples.
+# Real fable-session users should create and review a host-local profile for
+# their own repository and policy before launching a live runtime.
+version = 1
+product = "Deterministic fake-runtime MADP example."
+context_mode = "append"
+max_brief_bytes = 4096
+allowed_roots = ["."]

@@ -49,7 +49,7 @@ class TopologyTestCase(unittest.TestCase):
             entries += [
                 f"[project.{actor.settings['project']}]",
                 f'repo = "{support.REPO_ROOT}"',
-                'profile = "agent-context/profiles/fable-5.toml"',
+                f'profile = "{EXAMPLES / "fakes" / "fable-profile.toml"}"',
                 f'model = "{actor.expected_model}"',
                 'effort = "high"',
                 'fallback = "stop"',

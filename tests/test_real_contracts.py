@@ -67,7 +67,7 @@ def write_registry(path: Path, projects: dict[str, tuple[str, str]]) -> None:
         lines += [
             f"[project.{name}]",
             f'repo = "{path.parent}"',
-            'profile = "agent-context/profiles/fable-5.toml"',
+            f'profile = "{support.REPO_ROOT / "examples" / "fakes" / "fable-profile.toml"}"',
             f'model = "{model}"',
             'effort = "high"',
             'fallback = "stop"',

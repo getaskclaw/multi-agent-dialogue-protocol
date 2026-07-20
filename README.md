@@ -20,7 +20,7 @@ MADP is useful when you need:
 
 ## Two-minute safe demo
 
-Requirements: Git and Python 3.12 or newer. The demo uses deterministic fake runtimes, needs no account or API key, and contacts no agent service.
+Requirements: Bash, Git, and Python 3.12 or newer. The demo uses deterministic fake runtimes, needs no account or API key, and contacts no agent service.
 
 ```bash
 git clone https://github.com/getaskclaw/multi-agent-dialogue-protocol.git
@@ -29,7 +29,7 @@ python3 --version
 bash examples/two-hermes/run.sh
 ```
 
-This zero-install example runs directly from `src/`. It creates a throwaway Git repository, runs a complete bounded dialogue, records an owner decision, validates commit provenance, and prints the final status. Nothing is pushed.
+This zero-install example runs directly from `src/`. It creates a throwaway Git repository, proves a wrong actor is rejected without spawning a runtime, runs a complete bounded dialogue, records an owner decision, validates commit provenance, and exits 0 with `"ok": true` and final `"status": "OWNER_DECIDED"`. Nothing is pushed.
 
 Try the other fake topologies:
 

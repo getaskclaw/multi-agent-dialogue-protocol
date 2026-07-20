@@ -12,21 +12,27 @@ Nothing here contacts a real agent, credential, or network.
 ## Run one
 
 ```bash
-bash examples/two-claude/run.sh          # fresh temp dialogue directory
-bash examples/two-hermes/run.sh /tmp/my-dialogue   # or choose the directory
+bash examples/two-claude/run.sh          # fresh temporary repository root
+bash examples/two-hermes/run.sh /tmp/my-madp-demo  # new or empty repository root
 bash examples/three-mixed/run.sh
 ```
 
-Each script creates an **isolated throwaway Git repository** for the
-dialogue (a dialogue only initializes inside a Git worktree; the repo
-gets a repo-local identity, global Git config is never touched), then
+Without an argument, each script creates an **isolated throwaway Git
+repository**. A custom argument is the exact repository root, not its
+parent: it must be a new or empty non-symlink directory outside every
+existing Git worktree. The dialogue is created below it as `dialogue/`.
+The repo gets a repo-local identity; global Git config is never touched.
+
+The script then
 shows, in order: `init` (one initialization commit), a **dry run**
-(packet printed, no process starts), a rejected wrong-actor claim, one
+(packet printed, no process starts), a wrong-actor production launch
+rejected with the exact protocol error and an empty spawn marker, one
 `--launch` per scheduled turn (each successful turn is exactly one
 local commit), a rejected post-final turn, `owner-decide` (its own
 terminal commit), `validate --require-git` (proves the commit
 provenance and prints the proven SHAs), the dialogue's Git history, and
-the final JSON status. Nothing is ever pushed.
+the final JSON status. A successful run exits 0, prints `"ok": true`,
+and ends with `"status": "OWNER_DECIDED"`. Nothing is ever pushed.
 
 ## Step by step (two-claude)
 
@@ -56,6 +62,9 @@ python3 -m multi_agent_dialogue status "$D"
   revisions used. The two-claude and three-mixed `run.sh` scripts
   generate the host-local project registry under the dialogue's ignored
   `work/` scratch area (transport scratch is never committed).
+  Those registries point at the shipped, sanitized, fake-only
+  `fakes/fable-profile.toml`; live users must create and review their own
+  host-local profile before using a real runtime.
 - `fake-hermes` implements the real one-shot shape
   (`chat -q ... -Q --source ... --pass-session-id`) and records the
   session in `${HERMES_HOME}/state.db` with the real table/column
