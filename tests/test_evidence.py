@@ -44,6 +44,98 @@ class EvidenceValidationTests(unittest.TestCase):
     def test_valid_evidence_passes(self) -> None:
         self.assertEqual(self.check(self.valid_evidence()), [])
 
+    def test_substitute_evidence_requires_selection_provenance(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "fake-provider-c",
+                "expected_model": "fake-model-c",
+                "settings": {},
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        definition = config.parse_definition(raw)
+        actor = definition.actor("worker-c")
+        turn = definition.schedule[0]
+        record = support.make_evidence(
+            actor_id="worker-c",
+            round_id="R01",
+            artifact_path=self.artifact,
+            provider="fake-provider-c",
+            model="fake-model-c",
+        )
+        missing = evidence.validate_evidence(
+            record,
+            actor=actor,
+            turn=turn,
+            artifact_sha256=evidence.sha256_file(self.artifact),
+            substitution_reason="provider_cooldown",
+        )
+        self.assertTrue(any("scheduled_actor_id" in item for item in missing))
+        record.update(
+            {
+                "scheduled_actor_id": "worker-a",
+                "actor_selection": "substitute",
+                "substitution_reason": "provider_cooldown",
+            }
+        )
+        self.assertEqual(
+            evidence.validate_evidence(
+                record,
+                actor=actor,
+                turn=turn,
+                artifact_sha256=evidence.sha256_file(self.artifact),
+                substitution_reason="provider_cooldown",
+            ),
+            [],
+        )
+
+    def test_primary_evidence_is_explicit_when_turn_allows_substitute(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "fake-provider-c",
+                "expected_model": "fake-model-c",
+                "settings": {},
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        definition = config.parse_definition(raw)
+        actor = definition.actor("worker-a")
+        turn = definition.schedule[0]
+        record = self.valid_evidence()
+        missing = evidence.validate_evidence(
+            record,
+            actor=actor,
+            turn=turn,
+            artifact_sha256=evidence.sha256_file(self.artifact),
+        )
+        self.assertTrue(any("scheduled_actor_id" in item for item in missing))
+        record.update(
+            {
+                "scheduled_actor_id": "worker-a",
+                "actor_selection": "primary",
+                "substitution_reason": None,
+            }
+        )
+        self.assertEqual(
+            evidence.validate_evidence(
+                record,
+                actor=actor,
+                turn=turn,
+                artifact_sha256=evidence.sha256_file(self.artifact),
+            ),
+            [],
+        )
+
     def test_missing_field_rejected(self) -> None:
         record = self.valid_evidence()
         del record["session_id"]

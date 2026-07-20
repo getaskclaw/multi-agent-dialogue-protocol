@@ -40,6 +40,13 @@ def _next_legal_action(state: dict, turn) -> str:
         )
     if status == engine.STATUS_READY_FOR_OWNER or turn is None:
         return "owner-decide --decision FILE"
+    if turn.substitute_actor_ids:
+        substitutes = "|".join(turn.substitute_actor_ids)
+        reasons = "|".join(turn.substitution_reasons)
+        return (
+            f"run --actor {turn.actor_id} --launch; or run --actor "
+            f"<{substitutes}> --substitution-reason <{reasons}> --launch"
+        )
     return f"run --actor {turn.actor_id} --launch"
 
 
@@ -60,6 +67,10 @@ def _status_payload(dialogue: engine.Dialogue) -> dict:
         else {
             "round_id": turn.round_id,
             "actor_id": turn.actor_id,
+            "primary_actor_id": turn.actor_id,
+            "allowed_actor_ids": list(turn.allowed_actor_ids),
+            "substitute_actor_ids": list(turn.substitute_actor_ids),
+            "substitution_reasons": list(turn.substitution_reasons),
             "role": definition.actor(turn.actor_id).role,
             "transport": definition.actor(turn.actor_id).transport,
             "purpose": turn.purpose,
@@ -107,6 +118,10 @@ def cmd_next(args: argparse.Namespace) -> int:
             "done": False,
             "round_id": turn.round_id,
             "actor_id": turn.actor_id,
+            "primary_actor_id": turn.actor_id,
+            "allowed_actor_ids": list(turn.allowed_actor_ids),
+            "substitute_actor_ids": list(turn.substitute_actor_ids),
+            "substitution_reasons": list(turn.substitution_reasons),
             "role": actor.role,
             "transport": actor.transport,
             "purpose": turn.purpose,
@@ -120,9 +135,22 @@ def cmd_next(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     dialogue = engine.Dialogue(args.dialogue)
     if args.launch:
-        _emit(runner.launch(dialogue, args.actor, timeout=args.timeout))
+        _emit(
+            runner.launch(
+                dialogue,
+                args.actor,
+                timeout=args.timeout,
+                substitution_reason=args.substitution_reason,
+            )
+        )
     else:
-        _emit(runner.dry_run(dialogue, args.actor))
+        _emit(
+            runner.dry_run(
+                dialogue,
+                args.actor,
+                substitution_reason=args.substitution_reason,
+            )
+        )
     return 0
 
 
@@ -178,6 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("dialogue", type=Path)
     p.add_argument("--actor", required=True)
+    p.add_argument(
+        "--substitution-reason",
+        default=None,
+        help=(
+            "required for a substitute actor; must be one of the turn's "
+            "frozen substitution_reasons"
+        ),
+    )
     group = p.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true",
                        help="show the command packet without starting any process (default)")

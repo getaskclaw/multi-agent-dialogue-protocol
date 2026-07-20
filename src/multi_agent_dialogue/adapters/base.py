@@ -47,6 +47,7 @@ class PrepareContext:
     task_file: Path
     turn_file: Path
     evidence_file: Path
+    substitution_reason: str | None = None
 
     def placeholders(self) -> dict[str, str]:
         return {
@@ -192,6 +193,13 @@ class Adapter(ABC):
         return {
             "evidence_version": EVIDENCE_VERSION,
             "actor_id": context.actor.actor_id,
+            "scheduled_actor_id": context.turn.actor_id,
+            "actor_selection": (
+                "primary"
+                if context.actor.actor_id == context.turn.actor_id
+                else "substitute"
+            ),
+            "substitution_reason": context.substitution_reason,
             "round_id": context.turn.round_id,
             "adapter": self.name,
             "transport": self.transport,

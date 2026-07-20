@@ -27,10 +27,31 @@
       "minItems": 1,
       "items": {"type": "string", "minLength": 1}
     },
+    "agent_final_statuses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+      "description": "Optional frozen statuses for the final agent turn. They must not overlap owner_decisions. When set, the final artifact must contain exactly one Status: <VALUE> line."
+    },
     "owner_proof_argv": {
       "type": "array",
       "items": {"type": "string", "minLength": 1},
       "description": "Optional external owner-proof verifier command ({decision_file} is substituted). Without it, owner-decide records caller_identity as 'unverified': nothing authenticates WHO invoked the decision."
+    },
+    "continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_id", "round_id", "artifact_path", "artifact_sha256", "published_commit", "original_dialogue_head", "start_round"],
+      "properties": {
+        "protocol_id": {"type": "string", "minLength": 1},
+        "round_id": {"type": "string", "minLength": 1},
+        "artifact_path": {"type": "string", "pattern": "^/"},
+        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "published_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "original_dialogue_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "start_round": {"type": "string", "minLength": 1}
+      },
+      "description": "Optional machine-checked anchor for a bounded continuation. The artifact's live bytes, publication commit, original dialogue head, and first new round are frozen into the definition and rechecked on every state read."
     },
     "actors": {
       "type": "array",
@@ -68,9 +89,53 @@
         "type": "object",
         "required": ["round_id", "actor_id", "purpose", "artifact_kind"],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": ["substitute_actor_ids"],
+              "properties": {"substitute_actor_ids": {"minItems": 1}}
+            },
+            "then": {
+              "required": ["substitution_reasons"],
+              "properties": {"substitution_reasons": {"minItems": 1}}
+            },
+            "else": {
+              "properties": {"substitution_reasons": {"maxItems": 0}}
+            }
+          },
+          {
+            "if": {
+              "required": ["substitution_reasons"],
+              "properties": {"substitution_reasons": {"minItems": 1}}
+            },
+            "then": {
+              "required": ["substitute_actor_ids"],
+              "properties": {"substitute_actor_ids": {"minItems": 1}}
+            },
+            "else": {
+              "properties": {"substitute_actor_ids": {"maxItems": 0}}
+            }
+          }
+        ],
         "properties": {
           "round_id": {"type": "string", "minLength": 1},
-          "actor_id": {"type": "string", "minLength": 1},
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Primary scheduled actor for this turn."
+          },
+          "substitute_actor_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Ordered alternative actors preauthorized by the frozen definition. Each substitute must have the same protocol role as the primary actor_id, retains its own actor/provider/model identity, and never impersonates actor_id. Initialization does not authenticate who approved the definition."
+          },
+          "substitution_reasons": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+            "description": "Frozen reason-code allowlist required whenever substitute_actor_ids is non-empty. A substitute launch must provide one of these codes."
+          },
           "purpose": {"type": "string", "minLength": 1},
           "artifact_kind": {"type": "string", "minLength": 1},
           "word_limit": {"type": "integer", "minimum": 1}

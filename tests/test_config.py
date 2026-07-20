@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import jsonschema
 import support
 
 from multi_agent_dialogue import config
@@ -31,6 +32,30 @@ class ValidDefinitionTests(unittest.TestCase):
             [turn.actor_id for turn in definition.schedule],
             ["lead", "critic", "scribe"],
         )
+
+    def test_parses_owner_preapproved_substitute_actors(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "prov-c",
+                "expected_model": "model-c",
+                "settings": {
+                    "argv": ["fake-worker"],
+                    "identity_verifier_argv": ["fake-verifier"],
+                },
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        definition = config.parse_definition(raw)
+        turn = definition.schedule[0]
+        self.assertEqual(turn.actor_id, "worker-a")
+        self.assertEqual(turn.substitute_actor_ids, ("worker-c",))
+        self.assertEqual(turn.allowed_actor_ids, ("worker-a", "worker-c"))
+        self.assertEqual(turn.substitution_reasons, ("provider_cooldown",))
 
     def test_actor_lookup_by_id(self) -> None:
         definition = config.parse_definition(support.two_actor_definition())
@@ -63,6 +88,22 @@ class ValidDefinitionTests(unittest.TestCase):
         definition_b = config.parse_definition(raw)
         self.assertNotEqual(definition_a.digest(), definition_b.digest())
 
+    def test_parses_structured_continuation_anchor(self) -> None:
+        raw = support.two_actor_definition()
+        raw["continuation"] = {
+            "protocol_id": "prior-dialogue",
+            "round_id": "R00",
+            "artifact_path": "/tmp/prior/R00.md",
+            "artifact_sha256": "a" * 64,
+            "published_commit": "b" * 40,
+            "original_dialogue_head": "c" * 40,
+            "start_round": "R01",
+        }
+        definition = config.parse_definition(raw)
+        self.assertIsNotNone(definition.continuation)
+        assert definition.continuation is not None
+        self.assertEqual(definition.continuation.start_round, "R01")
+
 
 class InvalidDefinitionTests(unittest.TestCase):
     def assert_rejected(self, raw: dict, fragment: str) -> None:
@@ -86,6 +127,59 @@ class InvalidDefinitionTests(unittest.TestCase):
         raw = support.two_actor_definition()
         raw["schedule"][1]["actor_id"] = "ghost"
         self.assert_rejected(raw, "unknown actor")
+
+    def test_rejects_unknown_substitute_actor(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["ghost"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "unknown substitute actor")
+
+    def test_rejects_primary_actor_repeated_as_substitute(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-a"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "primary actor")
+
+    def test_rejects_duplicate_substitute_actor(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b", "worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "duplicate substitute actor")
+
+    def test_rejects_substitute_with_different_protocol_role(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "role must match primary actor")
+
+    def test_rejects_substitute_using_same_hermes_home(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"][1]["role"] = raw["actors"][0]["role"]
+        for actor in raw["actors"]:
+            actor["transport"] = "hermes-cli"
+            actor["settings"] = {
+                "command_name": "hermes",
+                "hermes_home": "/profiles/shared",
+            }
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "distinct hermes_home")
+
+    def test_rejects_substitutes_without_frozen_reason_codes(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        self.assert_rejected(raw, "substitution_reasons is required")
+
+    def test_rejects_reason_codes_without_substitutes(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.assert_rejected(raw, "requires substitute_actor_ids")
+
+    def test_rejects_unsafe_substitution_reason_code(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider\ncooldown"]
+        self.assert_rejected(raw, "safe reason code")
 
     def test_rejects_duplicate_round_ids(self) -> None:
         raw = support.two_actor_definition()
@@ -111,6 +205,19 @@ class InvalidDefinitionTests(unittest.TestCase):
         raw = support.two_actor_definition()
         raw["schedule"][0]["repeat"] = "forever"
         self.assert_rejected(raw, "unbounded")
+
+    def test_rejects_continuation_with_wrong_start_round(self) -> None:
+        raw = support.two_actor_definition()
+        raw["continuation"] = {
+            "protocol_id": "prior-dialogue",
+            "round_id": "R00",
+            "artifact_path": "/tmp/prior/R00.md",
+            "artifact_sha256": "a" * 64,
+            "published_commit": "b" * 40,
+            "original_dialogue_head": "c" * 40,
+            "start_round": "R02",
+        }
+        self.assert_rejected(raw, "start_round")
 
     def test_rejects_owner_who_is_also_actor(self) -> None:
         raw = support.two_actor_definition()
@@ -151,6 +258,11 @@ class InvalidDefinitionTests(unittest.TestCase):
         raw["owner_decisions"] = []
         self.assert_rejected(raw, "owner_decisions")
 
+    def test_rejects_agent_status_that_claims_owner_decision(self) -> None:
+        raw = support.two_actor_definition()
+        raw["agent_final_statuses"] = ["READY_FOR_OWNER", "APPROVE"]
+        self.assert_rejected(raw, "must not overlap owner_decisions")
+
     def test_load_rejects_invalid_json_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "broken.json"
@@ -188,6 +300,28 @@ class SchemaCrossCheckTests(unittest.TestCase):
         for example in examples:
             definition = config.parse_definition(example)
             self.assertGreaterEqual(len(definition.actors), 2)
+
+    def test_schema_enforces_substitute_reason_pairing(self) -> None:
+        schema = json.loads(
+            (support.REPO_ROOT / "schemas" / "protocol.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        base = support.two_actor_definition()
+        base["actors"][1]["role"] = base["actors"][0]["role"]
+        substitutes_only = json.loads(json.dumps(base))
+        substitutes_only["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        reasons_only = json.loads(json.dumps(base))
+        reasons_only["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        validator = jsonschema.Draft202012Validator(schema)
+        for raw in (substitutes_only, reasons_only):
+            with self.assertRaises(jsonschema.ValidationError):
+                validator.validate(raw)
+
+        valid = json.loads(json.dumps(base))
+        valid["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        valid["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        validator.validate(valid)
 
 
 if __name__ == "__main__":

@@ -28,8 +28,16 @@ WORK_DIR = "work"
 
 
 def _context_for(
-    dialogue: engine.Dialogue, actor_id: str
-) -> tuple[config.ProtocolDefinition, config.TurnSpec, adapters.PrepareContext]:
+    dialogue: engine.Dialogue,
+    actor_id: str,
+    substitution_reason: str | None = None,
+) -> tuple[
+    config.ProtocolDefinition,
+    config.TurnSpec,
+    adapters.PrepareContext,
+    str,
+    str | None,
+]:
     definition = dialogue.definition()
     try:
         actor = definition.actor(actor_id)
@@ -41,11 +49,18 @@ def _context_for(
             f"final turn {definition.final_round_id} is already complete; "
             "no further worker turns exist"
         )
-    if turn.actor_id != actor_id:
-        raise engine.ProtocolError(
-            f"{actor_id!r} is not the scheduled actor for {turn.round_id}; "
-            f"next actor is {turn.actor_id!r}"
-        )
+    if substitution_reason is None:
+        claim = dialogue.state().get("claim") or {}
+        if claim.get("actor_id") == actor_id and claim.get("round_id") == turn.round_id:
+            substitution_reason = claim.get("substitution_reason")
+    actor_selection, substitution_reason = engine.resolve_actor_selection(
+        turn, actor_id, substitution_reason
+    )
+    isolation_errors = engine.hermes_profile_isolation_errors(
+        definition, dialogue.directory.absolute(), turn
+    )
+    if isolation_errors:
+        raise engine.ProtocolError("\n".join(isolation_errors))
     work_dir = dialogue.directory.absolute() / WORK_DIR / turn.round_id
     context = adapters.PrepareContext(
         actor=actor,
@@ -55,8 +70,9 @@ def _context_for(
         task_file=work_dir / "task.md",
         turn_file=work_dir / "turn.md",
         evidence_file=work_dir / "evidence.json",
+        substitution_reason=substitution_reason,
     )
-    return definition, turn, context
+    return definition, turn, context, actor_selection, substitution_reason
 
 
 def build_task_briefing(
@@ -65,9 +81,17 @@ def build_task_briefing(
     dialogue: engine.Dialogue,
     context: adapters.PrepareContext,
     output_contract: tuple[str, ...],
+    substitution_reason: str | None = None,
 ) -> str:
-    actor = definition.actor(turn.actor_id)
+    # The selected runtime actor may be a frozen-definition substitute.
+    # It keeps its own actor/provider/model identity; ``turn.actor_id`` is
+    # always the primary scheduled actor and is never impersonated.
+    actor = context.actor
+    actor_selection = "primary" if actor.actor_id == turn.actor_id else "substitute"
     state = dialogue.state()
+    if substitution_reason is None:
+        claim = state.get("claim") or {}
+        substitution_reason = claim.get("substitution_reason")
     word_limit = (
         f"{turn.word_limit} words" if turn.word_limit is not None else "none"
     )
@@ -84,10 +108,23 @@ def build_task_briefing(
         "",
         f"- round_id: {turn.round_id}",
         f"- actor_id: {actor.actor_id}",
+        f"- scheduled_actor_id: {turn.actor_id}",
+        f"- actor_selection: {actor_selection}",
+        f"- substitution_reason: {substitution_reason or 'none'}",
+        f"- allowed_actor_ids: {', '.join(turn.allowed_actor_ids)}",
         f"- protocol_role: {actor.role}",
         f"- artifact_kind: {turn.artifact_kind}",
         f"- word_limit: {word_limit}",
     ]
+    if turn.round_id == definition.final_round_id and definition.agent_final_statuses:
+        lines.append(
+            "- final agent status: include exactly one `Status: <VALUE>` line; "
+            "allowed values: " + ", ".join(definition.agent_final_statuses)
+        )
+        lines.append(
+            "- agent status is not an owner decision; do not emit any "
+            f"owner-only token: {', '.join(definition.owner_decisions)}"
+        )
     completed = state.get("completed_turns", [])
     if completed:
         # Usable prior-turn context: absolute paths rooted in the dialogue
@@ -111,6 +148,14 @@ def build_task_briefing(
                 f"evidence {evidence_path} "
                 f"(sha256 {record['evidence_sha256']})"
             )
+    elif definition.continuation is not None:
+        anchor = definition.continuation
+        lines.append(
+            "- REQUIRED READING: this is a bounded continuation; read the "
+            f"anchored prior turn {anchor.round_id} at {anchor.artifact_path} "
+            f"(sha256 {anchor.artifact_sha256}) in full before producing this "
+            f"{turn.artifact_kind}."
+        )
     else:
         lines.append(
             "- prior turns: none — this is the first turn; "
@@ -125,6 +170,8 @@ def build_task_briefing(
         f"- Allowed evidence roots: {', '.join(definition.evidence_roots) or 'none'}.",
         "- This is exactly one turn; do not continue past it and do not "
         "claim any other actor's turn.",
+        "- If actor_selection is substitute, keep your actual actor identity; "
+        "never write as, claim to be, or impersonate the primary scheduled actor.",
         "- Runtime identity (provider, model, session) is observed "
         "externally; a written label never proves it.",
         "",
@@ -136,14 +183,23 @@ def build_task_briefing(
     return "\n".join(lines)
 
 
-def dry_run(dialogue: engine.Dialogue, actor_id: str) -> dict:
-    definition, turn, context = _context_for(dialogue, actor_id)
+def dry_run(
+    dialogue: engine.Dialogue,
+    actor_id: str,
+    substitution_reason: str | None = None,
+) -> dict:
+    definition, turn, context, actor_selection, substitution_reason = _context_for(
+        dialogue, actor_id, substitution_reason
+    )
     packet = adapters.adapter_for(context.actor).prepare(context)
     return {
         "dry_run": True,
         "executed": False,
         "round_id": turn.round_id,
         "actor_id": actor_id,
+        "scheduled_actor_id": turn.actor_id,
+        "actor_selection": actor_selection,
+        "substitution_reason": substitution_reason,
         "transport": context.actor.transport,
         "work_dir": str(context.work_dir),
         "packet": packet.as_dict(),
@@ -151,14 +207,26 @@ def dry_run(dialogue: engine.Dialogue, actor_id: str) -> dict:
     }
 
 
-def prepare(dialogue: engine.Dialogue, actor_id: str, output: Path | str) -> dict:
-    definition, turn, context = _context_for(dialogue, actor_id)
+def prepare(
+    dialogue: engine.Dialogue,
+    actor_id: str,
+    output: Path | str,
+    substitution_reason: str | None = None,
+) -> dict:
+    definition, turn, context, actor_selection, substitution_reason = _context_for(
+        dialogue, actor_id, substitution_reason
+    )
     adapter = adapters.adapter_for(context.actor)
     packet = adapter.prepare(context)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     briefing = build_task_briefing(
-        definition, turn, dialogue, context, adapter.output_contract(context)
+        definition,
+        turn,
+        dialogue,
+        context,
+        adapter.output_contract(context),
+        substitution_reason,
     )
     try:
         artifacts.write_bytes_exclusive(
@@ -170,24 +238,39 @@ def prepare(dialogue: engine.Dialogue, actor_id: str, output: Path | str) -> dic
         "prepared": True,
         "round_id": turn.round_id,
         "actor_id": actor_id,
+        "scheduled_actor_id": turn.actor_id,
+        "actor_selection": actor_selection,
+        "substitution_reason": substitution_reason,
         "task_file": str(output),
         "packet": packet.as_dict(),
     }
 
 
-def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None) -> dict:
-    definition, turn, context = _context_for(dialogue, actor_id)
+def launch(
+    dialogue: engine.Dialogue,
+    actor_id: str,
+    timeout: int | None = None,
+    substitution_reason: str | None = None,
+) -> dict:
+    definition, turn, context, actor_selection, substitution_reason = _context_for(
+        dialogue, actor_id, substitution_reason
+    )
     adapter = adapters.adapter_for(context.actor)
     try:
         packet = adapter.prepare(context)
     except adapters.AdapterError as exc:
         raise engine.ProtocolError(str(exc)) from exc
 
-    dialogue.claim(actor_id)
+    dialogue.claim(actor_id, substitution_reason=substitution_reason)
     try:
         context.work_dir.mkdir(parents=True, exist_ok=True)
         briefing = build_task_briefing(
-            definition, turn, dialogue, context, adapter.output_contract(context)
+            definition,
+            turn,
+            dialogue,
+            context,
+            adapter.output_contract(context),
+            substitution_reason,
         )
         try:
             artifacts.write_bytes_exclusive(
@@ -236,6 +319,9 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
         "executed": True,
         "completed_round": turn.round_id,
         "actor_id": actor_id,
+        "scheduled_actor_id": turn.actor_id,
+        "actor_selection": actor_selection,
+        "substitution_reason": substitution_reason,
         "status": state["status"],
         "turn_index": state["turn_index"],
         "packet": packet.as_dict(),

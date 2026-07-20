@@ -124,6 +124,23 @@ class ClaimTests(CliTestCase):
 
 
 class RunTests(CliTestCase):
+    def enable_r01_substitute(self) -> None:
+        self.raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "fake-provider-c",
+                "expected_model": "fake-model-c",
+                "settings": support.command_worker_settings(
+                    self.marker, "fake-provider-c", "fake-model-c"
+                ),
+            }
+        )
+        self.raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        self.raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.definition_path.write_text(json.dumps(self.raw), encoding="utf-8")
+
     def test_run_defaults_to_dry_run_no_process(self) -> None:
         self.init()
         before = (self.dialogue_dir / "state.json").read_text(encoding="utf-8")
@@ -153,6 +170,66 @@ class RunTests(CliTestCase):
         result = run_cli("run", str(self.dialogue_dir), "--actor", "worker-b", "--launch")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.spawn_count(), 0)
+
+    def test_substitute_cli_requires_and_records_frozen_reason(self) -> None:
+        self.enable_r01_substitute()
+        self.init()
+        missing = run_cli(
+            "run", str(self.dialogue_dir), "--actor", "worker-c", "--launch"
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("substitution reason", missing.stderr)
+        self.assertEqual(self.spawn_count(), 0)
+
+        result = run_cli(
+            "run",
+            str(self.dialogue_dir),
+            "--actor",
+            "worker-c",
+            "--substitution-reason",
+            "provider_cooldown",
+            "--launch",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["actor_id"], "worker-c")
+        self.assertEqual(payload["scheduled_actor_id"], "worker-a")
+        self.assertEqual(payload["substitution_reason"], "provider_cooldown")
+        status = json.loads(run_cli("status", str(self.dialogue_dir)).stdout)
+        record = status["completed_turns"][0]
+        self.assertEqual(record["actor_selection"], "substitute")
+        self.assertEqual(record["substitution_reason"], "provider_cooldown")
+
+    def test_primary_reason_and_post_final_substitute_fail_without_spawn(self) -> None:
+        self.enable_r01_substitute()
+        self.raw["schedule"] = self.raw["schedule"][:1]
+        self.raw["final_round_id"] = "R01"
+        self.definition_path.write_text(json.dumps(self.raw), encoding="utf-8")
+        self.init()
+
+        primary_reason = run_cli(
+            "run", str(self.dialogue_dir), "--actor", "worker-a",
+            "--substitution-reason", "provider_cooldown", "--launch",
+        )
+        self.assertNotEqual(primary_reason.returncode, 0)
+        self.assertEqual(self.spawn_count(), 0)
+
+        accepted = run_cli(
+            "run", str(self.dialogue_dir), "--actor", "worker-c",
+            "--substitution-reason", "provider_cooldown", "--launch",
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(self.spawn_count(), 1)
+        before = (self.dialogue_dir / "state.json").read_text(encoding="utf-8")
+        post_final = run_cli(
+            "run", str(self.dialogue_dir), "--actor", "worker-c",
+            "--substitution-reason", "provider_cooldown", "--launch",
+        )
+        self.assertNotEqual(post_final.returncode, 0)
+        self.assertEqual(self.spawn_count(), 1)
+        self.assertEqual(
+            (self.dialogue_dir / "state.json").read_text(encoding="utf-8"), before
+        )
 
     def test_run_rejects_conflicting_flags(self) -> None:
         self.init()

@@ -32,7 +32,11 @@ from .cli import _emit
 
 def cmd_claim(args: argparse.Namespace) -> int:
     dialogue = engine.Dialogue(args.dialogue)
-    state = dialogue.claim(args.actor, expected_revision=args.revision)
+    state = dialogue.claim(
+        args.actor,
+        expected_revision=args.revision,
+        substitution_reason=args.substitution_reason,
+    )
     _emit({"claimed": True, "status": state["status"], "claim": state["claim"],
            "revision": state["revision"]})
     return 0
@@ -40,7 +44,14 @@ def cmd_claim(args: argparse.Namespace) -> int:
 
 def cmd_prepare(args: argparse.Namespace) -> int:
     dialogue = engine.Dialogue(args.dialogue)
-    _emit(runner.prepare(dialogue, args.actor, args.output))
+    _emit(
+        runner.prepare(
+            dialogue,
+            args.actor,
+            args.output,
+            substitution_reason=args.substitution_reason,
+        )
+    )
     return 0
 
 
@@ -91,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("claim", help="atomically claim the next turn for an actor")
     p.add_argument("dialogue", type=Path)
     p.add_argument("--actor", required=True)
+    p.add_argument("--substitution-reason", default=None)
     p.add_argument("--revision", type=int, default=None,
                    help="compare-and-swap: fail if state revision differs")
     p.set_defaults(func=cmd_claim)
@@ -98,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prepare", help="write the non-secret task briefing for a turn")
     p.add_argument("dialogue", type=Path)
     p.add_argument("--actor", required=True)
+    p.add_argument("--substitution-reason", default=None)
     p.add_argument("--output", required=True, type=Path)
     p.set_defaults(func=cmd_prepare)
 

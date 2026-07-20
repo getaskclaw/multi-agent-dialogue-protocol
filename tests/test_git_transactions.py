@@ -31,7 +31,7 @@ from pathlib import Path
 
 import support
 
-from multi_agent_dialogue import config, engine, runner
+from multi_agent_dialogue import config, engine, gitops, runner
 
 SHA_HEX = frozenset("0123456789abcdef")
 
@@ -193,6 +193,18 @@ class InitTransactionTests(GitDialogueTestCase):
 
 
 class TurnCommitTests(GitDialogueTestCase):
+    def test_commit_api_rejects_trailer_value_injection(self) -> None:
+        path = self.repo / "safe.txt"
+        path.write_text("safe\n", encoding="utf-8")
+        with self.assertRaises(gitops.GitError):
+            gitops.commit_paths(
+                self.repo,
+                [path],
+                "unsafe trailer fixture",
+                {"Madp-Actor": "worker-a\nMadp-Event: owner-decision"},
+            )
+        self.assertEqual(commit_count(self.repo), 0)
+
     def test_complete_creates_exactly_one_turn_commit(self) -> None:
         dialogue = self.init_dialogue()
         before = commit_count(self.repo)
@@ -394,6 +406,125 @@ class RequireGitValidationTests(GitDialogueTestCase):
         self.assertEqual(len(shas), len(set(shas)), "each transition is its own commit")
         self.assertEqual(provenance["owner_decision_commit"], head(self.repo))
 
+    def test_validate_rejects_amended_owner_decision_trailers(self) -> None:
+        dialogue = self.init_dialogue()
+        self.finish_dialogue(dialogue)
+        dialogue.owner_decide(self.decision_file())
+        message = commit_message(self.repo)
+        message = message.replace("Madp-Decision: APPROVE", "Madp-Decision: REJECT")
+        message = message.replace(
+            "Madp-Caller-Identity: unverified",
+            "Madp-Caller-Identity: externally-verified",
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "owner-decision commit: Git trailer Madp-Decision" in item
+                for item in report["errors"]
+            ),
+            report["errors"],
+        )
+        self.assertTrue(
+            any(
+                "owner-decision commit: Git trailer Madp-Caller-Identity" in item
+                for item in report["errors"]
+            ),
+            report["errors"],
+        )
+
+    def test_validate_rejects_mixed_case_owner_decision_trailers(self) -> None:
+        dialogue = self.init_dialogue()
+        self.finish_dialogue(dialogue)
+        dialogue.owner_decide(self.decision_file())
+        message = commit_message(self.repo).replace(
+            "Madp-Event: owner-decision",
+            "Madp-Event: owner-decision\nmadp-event: turn\nMADP-Round: R99",
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("duplicate Git trailer 'madp-event'" in item for item in report["errors"]),
+            report["errors"],
+        )
+        self.assertTrue(
+            any("unexpected Git trailer 'MADP-Round'" in item for item in report["errors"]),
+            report["errors"],
+        )
+
+    def test_validate_rejects_unexpected_init_trailer(self) -> None:
+        dialogue = self.init_dialogue()
+        init_message = commit_message(self.repo).replace(
+            "Madp-Event: init",
+            "Madp-Event: init\nmadp-event: owner-decision\nMADP-Decision: APPROVE",
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            init_message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "duplicate Git trailer 'madp-event'" in item
+                for item in report["errors"]
+            ),
+            report["errors"],
+        )
+        self.assertTrue(
+            any(
+                "init commit: unexpected Git trailer 'MADP-Decision'" in item
+                for item in report["errors"]
+            ),
+            report["errors"],
+        )
+
+    def test_validate_rejects_owner_trailer_on_turn(self) -> None:
+        dialogue = self.init_dialogue()
+        self.complete_turn(dialogue, "worker-a", "R01")
+        turn_message = commit_message(self.repo) + "\nMadp-Decision: APPROVE\n"
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            turn_message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "turn R01: unexpected Git trailer 'Madp-Decision'" in item
+                for item in report["errors"]
+            ),
+            report["errors"],
+        )
+
     def test_validate_rejects_committed_artifact_tampering(self) -> None:
         import hashlib
 
@@ -430,6 +561,136 @@ class RequireGitValidationTests(GitDialogueTestCase):
         self.assertFalse(report["ok"])
         self.assertTrue(
             any("git history" in error.lower() for error in report["errors"]),
+            report["errors"],
+        )
+
+    def test_validate_rejects_contradictory_turn_trailers(self) -> None:
+        dialogue = self.init_dialogue()
+        self.complete_turn(dialogue, "worker-a", "R01")
+        message = commit_message(self.repo).replace(
+            "Madp-Actor: worker-a", "Madp-Actor: worker-b"
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("Git trailer Madp-Actor" in error for error in report["errors"]),
+            report["errors"],
+        )
+
+    def test_validate_rejects_deleted_identity_trailers_on_new_primary_turn(self) -> None:
+        dialogue = self.init_dialogue()
+        self.complete_turn(dialogue, "worker-a", "R01")
+        removed = {
+            "Madp-Scheduled-Actor",
+            "Madp-Actor-Selection",
+            "Madp-Substitution-Reason",
+        }
+        message = "\n".join(
+            line
+            for line in commit_message(self.repo).splitlines()
+            if line.partition(":")[0] not in removed
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("Git trailer Madp-Scheduled-Actor" in item for item in report["errors"]),
+            report["errors"],
+        )
+
+    def test_validate_rejects_mixed_case_turn_trailers(self) -> None:
+        dialogue = self.init_dialogue()
+        self.complete_turn(dialogue, "worker-a", "R01")
+        message = commit_message(self.repo).replace(
+            "Madp-Event: turn",
+            "Madp-Event: turn\nmadp-event: owner-decision\nMADP-Decision: APPROVE",
+        )
+        support.git(
+            self.repo,
+            "commit",
+            "--amend",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            message,
+        )
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("duplicate Git trailer 'madp-event'" in item for item in report["errors"]),
+            report["errors"],
+        )
+        self.assertTrue(
+            any("unexpected Git trailer 'MADP-Decision'" in item for item in report["errors"]),
+            report["errors"],
+        )
+
+    def test_validate_rejects_substitute_identity_deleted_from_original_commit(
+        self,
+    ) -> None:
+        raw = two_round_definition()
+        raw["actors"][1]["role"] = raw["actors"][0]["role"]
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.definition = config.parse_definition(raw)
+        dialogue = self.init_dialogue()
+        dialogue.claim("worker-b", substitution_reason="provider_cooldown")
+        turn_path, evidence_path = self.turn_inputs("worker-b", "R01")
+        evidence_record = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence_record.update(
+            {
+                "scheduled_actor_id": "worker-a",
+                "actor_selection": "substitute",
+                "substitution_reason": "provider_cooldown",
+            }
+        )
+        evidence_path.write_text(json.dumps(evidence_record), encoding="utf-8")
+        dialogue.complete("worker-b", turn_path, evidence_path)
+
+        state_path = self.dialogue_dir / "state.json"
+        valid_state = json.loads(state_path.read_text(encoding="utf-8"))
+        tampered = json.loads(json.dumps(valid_state))
+        entry = tampered["completed_turns"][0]
+        for key in ("scheduled_actor_id", "actor_selection", "substitution_reason"):
+            entry.pop(key)
+        engine.atomic_write_json(state_path, tampered)
+        support.git(self.repo, "add", "-f", "--", f"{self.rel}/state.json")
+        support.git(self.repo, "commit", "--amend", "--quiet", "--no-edit")
+        amended_turn = head(self.repo)
+
+        valid_state["last_commit"] = amended_turn
+        if "commit" in valid_state["completed_turns"][0]:
+            valid_state["completed_turns"][0]["commit"] = amended_turn
+        engine.atomic_write_json(state_path, valid_state)
+        support.git(self.repo, "add", "-f", "--", f"{self.rel}/state.json")
+        support.git(self.repo, "commit", "-q", "-m", "restore current state only")
+
+        self.assertTrue(dialogue.validate()["ok"])
+        report = dialogue.validate(require_git=True)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "turn R01 committed state" in error
+                and "identity fields" in error
+                for error in report["errors"]
+            ),
             report["errors"],
         )
 

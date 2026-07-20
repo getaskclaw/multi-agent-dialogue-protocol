@@ -9,7 +9,7 @@ git clone https://github.com/getaskclaw/multi-agent-dialogue-protocol.git
 cd multi-agent-dialogue-protocol
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e '.[test]'
 ```
 
 ## Verify
