@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-dialogue-protocol"
+version = "1.0.0"
+description = "Evidence-first, Git-backed bounded dialogue protocol for AI-agent runtimes"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{name = "getaskclaw"}]
+keywords = ["agents", "ai-agents", "multi-agent", "protocol", "provenance", "git"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/getaskclaw/multi-agent-dialogue-protocol"
+Repository = "https://github.com/getaskclaw/multi-agent-dialogue-protocol"
+Issues = "https://github.com/getaskclaw/multi-agent-dialogue-protocol/issues"
+
+[project.scripts]
+madp = "multi_agent_dialogue.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

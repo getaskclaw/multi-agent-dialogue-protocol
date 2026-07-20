@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/runtime-evidence.schema.json",
+  "title": "Runtime evidence for one completed dialogue turn",
+  "description": "Machine-readable proof of the runtime identity that produced a turn. A Markdown 'actor:' or 'model:' field is never sufficient.",
+  "type": "object",
+  "required": [
+    "evidence_version",
+    "actor_id",
+    "round_id",
+    "adapter",
+    "transport",
+    "provider",
+    "model",
+    "session_id",
+    "outcome",
+    "exit_status",
+    "artifact_path",
+    "artifact_sha256",
+    "captured_at",
+    "proof"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "evidence_version": {"const": 1},
+    "actor_id": {"type": "string", "minLength": 1},
+    "round_id": {"type": "string", "minLength": 1},
+    "adapter": {"type": "string", "minLength": 1},
+    "transport": {
+      "type": "string",
+      "enum": ["command", "fable-session", "hermes-cli"]
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provider actually observed at run time."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model actually observed at run time."
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session/run ID of the worker process. Must be unique per completed turn within a dialogue."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["success", "failure", "timeout", "cancelled"],
+      "description": "Terminal outcome; anything other than success blocks completion."
+    },
+    "exit_status": {"type": "integer"},
+    "artifact_path": {"type": "string", "minLength": 1},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "captured_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+      "description": "UTC capture time."
+    },
+    "proof": {
+      "type": "object",
+      "required": ["kind"],
+      "minProperties": 1,
+      "description": "Adapter-derived proof references from EXTERNAL records — never worker-authored. kind names the record family; the remaining keys point at the backing records (manifest/audit/stream for fable-session, state.db facts for hermes-cli, the verifier report for command).",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "External record family, e.g. fable-session, hermes-state-db, external-command-verifier."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "evidence_version": 1,
+      "actor_id": "worker-a",
+      "round_id": "R01",
+      "adapter": "command",
+      "transport": "command",
+      "provider": "provider-a",
+      "model": "model-a",
+      "session_id": "run-000001",
+      "outcome": "success",
+      "exit_status": 0,
+      "artifact_path": "work/R01/turn.md",
+      "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "captured_at": "2026-07-16T00:00:00Z",
+      "proof": {
+        "kind": "external-command-verifier",
+        "worker_argv": ["fake-worker", "--task", "task.md"],
+        "verifier_argv": ["fake-verifier", "--turn", "turn.md"],
+        "report": {"fake": true, "provider": "provider-a", "model": "model-a"}
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "protocol_id": "example-two-claude",
+  "version": 1,
+  "owner": "owner-human",
+  "source_sha": "0000000000000000000000000000000000000000",
+  "evidence_roots": ["docs/"],
+  "owner_decisions": ["APPROVE", "REJECT", "NEED_MORE_EVIDENCE"],
+  "actors": [
+    {
+      "actor_id": "claude-a",
+      "role": "proposer",
+      "transport": "fable-session",
+      "expected_provider": "anthropic",
+      "expected_model": "claude-fable-5",
+      "settings": {
+        "command_name": "fake-fable-session",
+        "project": "claude-a",
+        "registry": "work/fable/registry.toml",
+        "state_dir": "work/fable/state-claude-a",
+        "tmux_prefix": "madpa-",
+        "tmux_command_name": "fake-tmux"
+      }
+    },
+    {
+      "actor_id": "claude-b",
+      "role": "challenger",
+      "transport": "fable-session",
+      "expected_provider": "anthropic",
+      "expected_model": "claude-opus-4-8",
+      "settings": {
+        "command_name": "fake-fable-session",
+        "project": "claude-b",
+        "registry": "work/fable/registry.toml",
+        "state_dir": "work/fable/state-claude-b",
+        "tmux_prefix": "madpb-",
+        "tmux_command_name": "fake-tmux"
+      }
+    }
+  ],
+  "schedule": [
+    {"round_id": "R01", "actor_id": "claude-a", "purpose": "propose a design", "artifact_kind": "proposal", "word_limit": 700},
+    {"round_id": "R02", "actor_id": "claude-b", "purpose": "challenge the proposal", "artifact_kind": "challenge", "word_limit": 700},
+    {"round_id": "R03", "actor_id": "claude-a", "purpose": "respond to the challenge", "artifact_kind": "response", "word_limit": 700},
+    {"round_id": "R04", "actor_id": "claude-b", "purpose": "final recommendation for the owner", "artifact_kind": "recommendation", "word_limit": 700}
+  ],
+  "final_round_id": "R04"
+}

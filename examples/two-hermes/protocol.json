@@ -1,0 +1,41 @@
+{
+  "protocol_id": "example-two-hermes",
+  "version": 1,
+  "owner": "owner-human",
+  "source_sha": "1111111111111111111111111111111111111111",
+  "evidence_roots": [],
+  "owner_decisions": ["APPROVE", "REJECT", "NEED_MORE_EVIDENCE"],
+  "actors": [
+    {
+      "actor_id": "hermes-north",
+      "role": "proposer",
+      "transport": "hermes-cli",
+      "expected_provider": "nousresearch",
+      "expected_model": "hermes-4-405b",
+      "settings": {
+        "command_name": "fake-hermes",
+        "hermes_home": "work/hermes-homes/north",
+        "env": {"FAKE_MODEL": "hermes-4-405b", "FAKE_PROVIDER": "nousresearch"}
+      }
+    },
+    {
+      "actor_id": "hermes-south",
+      "role": "challenger",
+      "transport": "hermes-cli",
+      "expected_provider": "nousresearch",
+      "expected_model": "hermes-4-70b",
+      "settings": {
+        "command_name": "fake-hermes",
+        "hermes_home": "work/hermes-homes/south",
+        "env": {"FAKE_MODEL": "hermes-4-70b", "FAKE_PROVIDER": "nousresearch"}
+      }
+    }
+  ],
+  "schedule": [
+    {"round_id": "R01", "actor_id": "hermes-north", "purpose": "propose a design", "artifact_kind": "proposal", "word_limit": 700},
+    {"round_id": "R02", "actor_id": "hermes-south", "purpose": "challenge the proposal", "artifact_kind": "challenge", "word_limit": 700},
+    {"round_id": "R03", "actor_id": "hermes-north", "purpose": "respond to the challenge", "artifact_kind": "response", "word_limit": 700},
+    {"round_id": "R04", "actor_id": "hermes-south", "purpose": "final recommendation for the owner", "artifact_kind": "recommendation", "word_limit": 700}
+  ],
+  "final_round_id": "R04"
+}

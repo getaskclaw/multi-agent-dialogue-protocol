@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Contract-faithful fake of the ONLY tmux surface the claude-fable
+adapter may use for post-launch lane cleanup:
+
+    tmux kill-session -t =EXACT-NAME
+    tmux has-session  -t =EXACT-NAME     (exit 0 alive, exit 1 gone)
+
+Real tmux treats a ``=``-prefixed target as exact-match only; a bare
+name is fuzzy/prefix-matched and could hit an unrelated user session,
+so this fake REJECTS it (exit 2). Every other subcommand
+(``list-sessions``, ``kill-server``, ...) is rejected the same way:
+the adapter must never inspect or touch sessions it did not create.
+
+The live-session registry is the directory named by ``FAKE_TMUX_DIR``:
+one file per live session, created by ``fake-fable-session run
+--launch`` and removed when the fake lane reaches a successful terminal
+state. Without ``FAKE_TMUX_DIR`` the fake behaves like tmux with no
+server running (exit 1, nothing alive).
+
+Knobs: ``FAKE_TMUX_STUCK=1`` makes ``kill-session`` exit 0 while
+leaving the session alive, so tests can prove the adapter verifies
+death with ``has-session`` instead of trusting kill's exit status.
+Every invocation appends ``tmux:<subcommand>:<target>`` to
+``FAKE_SPAWN_MARKER`` so tests can prove exactly which sessions were
+ever targeted.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fakelib  # noqa: E402
+
+_ALLOWED = ("kill-session", "has-session")
+_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def fail(message: str, code: int) -> int:
+    print(f"fake-tmux: {message}", file=sys.stderr)
+    return code
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    subcommand = argv[0] if argv else "<none>"
+    target = ""
+    if len(argv) == 3 and argv[1] == "-t":
+        target = argv[2]
+    _fakelib.mark_spawn(f"tmux:{subcommand}:{target}")
+    _fakelib.forced_exit()
+
+    if subcommand not in _ALLOWED:
+        return fail(
+            f"subcommand {subcommand!r} is forbidden: lane cleanup may only "
+            f"use {', '.join(_ALLOWED)} on its own generated session",
+            2,
+        )
+    if len(argv) != 3 or argv[1] != "-t":
+        return fail(f"usage: fake-tmux {subcommand} -t =SESSION-NAME", 2)
+    if not target.startswith("="):
+        return fail(
+            f"target {target!r} is not '='-prefixed: a fuzzy/prefix match "
+            "could hit an unrelated session; exact-match targets only",
+            2,
+        )
+    name = target[1:]
+    if not _NAME_RE.fullmatch(name):
+        return fail(f"session name {name!r} is not allowed", 2)
+
+    tmux_dir = os.environ.get("FAKE_TMUX_DIR")
+    if not tmux_dir:
+        # Like real tmux with no server: nothing exists, nothing to kill.
+        return fail("no server running", 1)
+    session = Path(tmux_dir) / name
+
+    if subcommand == "has-session":
+        if session.is_file():
+            return 0
+        return fail(f"can't find session: {name}", 1)
+
+    # kill-session
+    if not session.is_file():
+        return fail(f"can't find session: {name}", 1)
+    if os.environ.get("FAKE_TMUX_STUCK"):
+        # Lie: report success but leave the lane alive.
+        return 0
+    session.unlink()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

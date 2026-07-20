@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Contract-faithful fake of the Hermes Agent one-shot CLI.
+
+Implements the pinned compatibility shape:
+
+    HERMES_HOME=/abs/actor/home fake-hermes chat -q PROMPT -Q \
+        --source UNIQUE_SOURCE --pass-session-id
+
+There is deliberately no ``one-shot`` subcommand and no ``--task`` /
+``--turn-output`` / ``--evidence-output`` / ``--round`` / ``--actor``
+option. Like the real agent, the durable record is the actor-specific
+``${HERMES_HOME}/state.db``: this fake creates the ``sessions``,
+``messages``, and ``session_model_usage`` tables (real column names)
+and records one session tagged with ``--source``, its observed model /
+billing provider, and the message history — including an inactive
+"ghost" assistant row after the final active one, so consumers must
+really filter on ``active = 1``. Stdout is intentionally NOT
+authoritative.
+
+The successful compatibility path exits 0, records the final active
+assistant message and positive ``api_call_count`` usage, and leaves
+``sessions.ended_at`` and ``sessions.end_reason`` NULL. No DB terminal
+state is persisted on success.
+
+Fixture knobs: FAKE_MODEL, FAKE_PROVIDER, FAKE_OUTCOME=error (persists
+a dirty terminal: ended_at set, end_reason='error'), FAKE_ENDED
+(persists a clean terminal: ended_at set, end_reason='completed'),
+FAKE_API_CALLS (usage api_call_count, default 1), FAKE_STDOUT_LIE
+(stdout differs from the database), FAKE_EXTRA_SESSION (second session
+with the same source), FAKE_MULTI_MODEL (second observed model),
+FAKE_SPAWN_MARKER, FAKE_EXIT, FAKE_WORD_COUNT.
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fakelib  # noqa: E402
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    model TEXT,
+    model_config TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    billing_provider TEXT,
+    profile_name TEXT
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    content TEXT,
+    timestamp REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    compacted INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS session_model_usage (
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    model TEXT NOT NULL,
+    billing_provider TEXT NOT NULL DEFAULT '',
+    api_call_count INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def usage_error(message: str) -> "SystemExit":
+    print(f"fake-hermes: error: {message}", file=sys.stderr)
+    return SystemExit(2)
+
+
+def parse_chat_args(argv: list[str]) -> dict:
+    args = {"query": None, "quiet": False, "source": None,
+            "pass_session_id": False, "model": None}
+    i = 0
+    while i < len(argv):
+        item = argv[i]
+        if item in ("-q", "--query"):
+            i += 1
+            if i >= len(argv):
+                raise usage_error(f"{item} requires a value")
+            args["query"] = argv[i]
+        elif item in ("-Q", "--quiet"):
+            args["quiet"] = True
+        elif item == "--source":
+            i += 1
+            if i >= len(argv):
+                raise usage_error("--source requires a value")
+            args["source"] = argv[i]
+        elif item == "--pass-session-id":
+            args["pass_session_id"] = True
+        elif item in ("-m", "--model"):
+            i += 1
+            if i >= len(argv):
+                raise usage_error(f"{item} requires a value")
+            args["model"] = argv[i]
+        else:
+            raise usage_error(f"unrecognized argument: {item}")
+        i += 1
+    if not args["query"]:
+        raise usage_error("a -q/--query prompt is required in one-shot mode")
+    if not args["source"]:
+        raise usage_error("--source is required for this fixture")
+    return args
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or argv[0] != "chat":
+        print(
+            "fake-hermes: error: this fixture only implements the real "
+            "one-shot shape `hermes chat -q ... -Q --source ... "
+            "--pass-session-id` (there is no `hermes one-shot`)",
+            file=sys.stderr,
+        )
+        return 2
+    args = parse_chat_args(argv[1:])
+    _fakelib.mark_spawn("hermes-chat")
+    _fakelib.forced_exit()
+
+    home = os.environ.get("HERMES_HOME", "").strip()
+    if not home:
+        print("fake-hermes: error: HERMES_HOME must be set explicitly", file=sys.stderr)
+        return 2
+    home_path = Path(home)
+    home_path.mkdir(parents=True, exist_ok=True)
+
+    model = args["model"] or os.environ.get("FAKE_MODEL", "hermes-4-405b")
+    provider = os.environ.get("FAKE_PROVIDER", "nousresearch")
+    source = args["source"]
+    session_id = f"fake_{_fakelib.seed(source)}"
+    seed_value = _fakelib.seed(source, model)
+    final_text = (
+        f"# Hermes turn for source {source}\n\n"
+        f"Deterministic fake Hermes turn (seed {seed_value}).\n\n"
+        f"{_fakelib.body(seed_value)}"
+    )
+
+    started = time.time()
+    if os.environ.get("FAKE_OUTCOME"):
+        # A failed run persists a dirty terminal state.
+        ended, end_reason = started + 0.01, "error"
+    elif os.environ.get("FAKE_ENDED"):
+        # Explicitly persisted clean terminal fields, valid when present.
+        ended, end_reason = started + 0.01, "completed"
+    else:
+        # Compatibility path: a successful one-shot leaves both NULL.
+        ended, end_reason = None, None
+    api_calls = int(os.environ.get("FAKE_API_CALLS", "1"))
+
+    con = sqlite3.connect(home_path / "state.db")
+    try:
+        con.executescript(SCHEMA)
+        con.execute(
+            "INSERT INTO sessions (id, source, model, model_config, started_at, "
+            "ended_at, end_reason, billing_provider, profile_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, source, model, "{}", started, ended, end_reason,
+             provider, "fake-hermes"),
+        )
+        rows = [
+            (session_id, "user", args["query"], started, 1),
+            (session_id, "assistant",
+             f"Intermediate draft {seed_value} — superseded.", started + 0.001, 1),
+            (session_id, "assistant", final_text, started + 0.002, 1),
+            # Inactive row AFTER the final active message: consumers that
+            # forget the active filter would publish this instead.
+            (session_id, "assistant",
+             "GHOST inactive assistant row — never the turn.", started + 0.003, 0),
+        ]
+        con.executemany(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        con.execute(
+            "INSERT INTO session_model_usage (session_id, model, billing_provider, "
+            "api_call_count) VALUES (?, ?, ?, ?)",
+            (session_id, model, provider, api_calls),
+        )
+        if os.environ.get("FAKE_MULTI_MODEL"):
+            con.execute(
+                "INSERT INTO session_model_usage (session_id, model, "
+                "billing_provider, api_call_count) VALUES (?, ?, ?, ?)",
+                (session_id, model + "-alt", provider, 1),
+            )
+        if os.environ.get("FAKE_EXTRA_SESSION"):
+            con.execute(
+                "INSERT INTO sessions (id, source, model, model_config, started_at, "
+                "ended_at, end_reason, billing_provider, profile_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id + "_dup", source, model, "{}", started, ended,
+                 end_reason, provider, "fake-hermes"),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    # Stdout is convenience output, never the identity/turn authority.
+    if os.environ.get("FAKE_STDOUT_LIE"):
+        print("STDOUT-ONLY-TEXT-DO-NOT-TRUST")
+    else:
+        print(final_text)
+    if args["pass_session_id"]:
+        print(f"Session ID: {session_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

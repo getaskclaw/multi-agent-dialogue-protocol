@@ -1,0 +1,72 @@
+{
+  "protocol_id": "example-three-mixed",
+  "version": 1,
+  "owner": "owner-human",
+  "source_sha": "2222222222222222222222222222222222222222",
+  "evidence_roots": ["docs/", "src/"],
+  "owner_decisions": ["APPROVE", "REJECT", "NEED_MORE_EVIDENCE"],
+  "actors": [
+    {
+      "actor_id": "claude-lead",
+      "role": "proposer",
+      "transport": "fable-session",
+      "expected_provider": "anthropic",
+      "expected_model": "claude-fable-5",
+      "settings": {
+        "command_name": "fake-fable-session",
+        "project": "claude-lead",
+        "registry": "work/fable/registry.toml",
+        "state_dir": "work/fable/state-claude-lead",
+        "tmux_prefix": "madplead-",
+        "tmux_command_name": "fake-tmux"
+      }
+    },
+    {
+      "actor_id": "hermes-critic",
+      "role": "challenger",
+      "transport": "hermes-cli",
+      "expected_provider": "nousresearch",
+      "expected_model": "hermes-4-405b",
+      "settings": {
+        "command_name": "fake-hermes",
+        "hermes_home": "work/hermes-homes/critic",
+        "env": {"FAKE_MODEL": "hermes-4-405b", "FAKE_PROVIDER": "nousresearch"}
+      }
+    },
+    {
+      "actor_id": "tool-scribe",
+      "role": "synthesizer",
+      "transport": "command",
+      "expected_provider": "local-tools",
+      "expected_model": "deterministic-scribe-1",
+      "settings": {
+        "argv": [
+          "fake-worker",
+          "--task", "{task_file}",
+          "--turn-output", "{turn_file}",
+          "--round", "{round_id}",
+          "--actor", "{actor_id}"
+        ],
+        "identity_verifier_argv": [
+          "fake-verifier",
+          "--turn", "{turn_file}",
+          "--round", "{round_id}",
+          "--actor", "{actor_id}"
+        ],
+        "env": {
+          "FAKE_PROVIDER": "local-tools",
+          "FAKE_MODEL": "deterministic-scribe-1"
+        }
+      }
+    }
+  ],
+  "schedule": [
+    {"round_id": "R01", "actor_id": "claude-lead", "purpose": "propose a design", "artifact_kind": "proposal", "word_limit": 700},
+    {"round_id": "R02", "actor_id": "hermes-critic", "purpose": "challenge the proposal", "artifact_kind": "challenge", "word_limit": 700},
+    {"round_id": "R03", "actor_id": "tool-scribe", "purpose": "summarize open disagreements", "artifact_kind": "synthesis", "word_limit": 400},
+    {"round_id": "R04", "actor_id": "claude-lead", "purpose": "respond to the challenge", "artifact_kind": "response", "word_limit": 700},
+    {"round_id": "R05", "actor_id": "hermes-critic", "purpose": "provisional recommendation", "artifact_kind": "recommendation", "word_limit": 700},
+    {"round_id": "R06", "actor_id": "tool-scribe", "purpose": "closure summary for the owner", "artifact_kind": "closure", "word_limit": 400}
+  ],
+  "final_round_id": "R06"
+}

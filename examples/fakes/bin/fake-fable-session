@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+"""Contract-faithful fake of ``fable-session`` 0.3.0b1.
+
+Implements the REAL verified lifecycle:
+
+    fake-fable-session run --project NAME --task ABS --registry ABS \
+        --state-dir ABS [--dry-run | --launch --tmux PREFIX-UNIQUE]
+    fake-fable-session watch --manifest ABS [--once | --follow]
+    fake-fable-session audit --manifest ABS --format json
+
+Like the real tool it rejects the invented flags (--profile,
+--turn-output, --evidence-output, --round, --actor), requires the
+strict task sections, validates the tmux name against the registry
+prefix, writes ``<state>/runs/<run-id>/manifest.json`` naming the
+structured stream, prints ``run manifest: <path> (pending)`` on launch,
+and treats the audit JSON as the model authority. No tmux, Claude,
+network, or credentials: the "session" is a synchronously written
+stream-json transcript whose FINAL text-bearing assistant event is the
+turn. The manifest's ``tool`` field names this fake honestly.
+
+Tmux realism: when ``FAKE_TMUX_DIR`` is set, ``run --launch`` registers
+its ``--tmux`` session name as a live-session file there (the registry
+``fake-tmux`` serves). A lane that reaches a SUCCESSFUL terminal result
+removes its file (the session exits); a failed, stuck, or crashed lane
+leaves it alive, exactly like a real wedged tmux session.
+
+Fixture knobs: FAKE_MODEL (serve a different model than requested),
+FAKE_OUTCOME=error (failed terminal result, lane stays alive),
+FAKE_LAUNCH_EXIT=N (crash after creating the tmux session, before
+printing the manifest line), FAKE_LANE_STUCK=1 (no terminal result at
+all: the lane keeps running and ``watch --follow`` blocks),
+FAKE_SPAWN_MARKER, FAKE_EXIT, FAKE_WORD_COUNT.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fakelib  # noqa: E402
+
+TOOL = "fake-fable-session 0.3.0b1 (deterministic fake)"
+
+
+def fail(prog: str, message: str) -> "SystemExit":
+    print(f"{prog}: error: {message}", file=sys.stderr)
+    return SystemExit(2)
+
+
+def load_registry(prog: str, registry: Path, project: str) -> dict:
+    if not registry.is_absolute():
+        raise fail(prog, f"registry path must be absolute, got '{registry}'")
+    try:
+        with open(registry, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise fail(prog, f"cannot read registry {registry}: {exc}")
+    table = data.get("project", {}).get(project)
+    if not isinstance(table, dict):
+        raise fail(prog, f"project '{project}' is not registered in {registry}")
+    for key in ("model", "tmux_prefix"):
+        if not isinstance(table.get(key), str) or not table[key]:
+            raise fail(prog, f"project '{project}' registry entry has no '{key}'")
+    return table
+
+
+def run_dir(state_dir: Path, run_id: str) -> Path:
+    return state_dir / "runs" / run_id
+
+
+def cmd_run(argv: list[str]) -> int:
+    prog = "fake-fable-session run"
+    parser = argparse.ArgumentParser(prog=prog)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--tmux")
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--claude-bin", type=Path)
+    args = parser.parse_args(argv)
+
+    mode = "launch" if args.launch else "dry-run"
+    _fakelib.mark_spawn(f"fable-run:{mode}")
+    _fakelib.forced_exit()
+
+    if args.launch and args.dry_run:
+        raise fail(prog, "--launch and --dry-run are mutually exclusive")
+    if args.launch and not args.tmux:
+        raise fail(prog, "--launch requires --tmux <new-session-name>")
+    if args.tmux and not args.launch:
+        raise fail(prog, "--tmux is only valid with --launch; dry runs start nothing")
+
+    task_path = Path(args.task)
+    if not task_path.is_absolute():
+        raise fail(prog, f"task path must be absolute, got '{args.task}'")
+    try:
+        task_text = task_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise fail(prog, f"task file not found: {exc}")
+    _fakelib.parse_task_sections(task_text, str(task_path))
+
+    project = load_registry(prog, args.registry, args.project)
+    state_dir = Path(os.path.abspath(args.state_dir))
+    task_sha = _fakelib.seed(task_text)
+
+    if not args.launch:
+        run_id = f"dryrun-{args.project}-{task_sha}"
+        directory = run_dir(state_dir, run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "tool": TOOL,
+            "run_id": run_id,
+            "mode": "dry-run",
+            "status": "dry-run",
+            "project": args.project,
+            "model": project["model"],
+            "session_id": f"fable-fake-dry-{task_sha}",
+            "expected_transcript_path": str(directory / "stream.jsonl"),
+            "tmux_session": None,
+            "payload_files_created": False,
+        }
+        manifest_path = directory / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        print(f"{prog} summary")
+        print("  mode: dry-run")
+        print(f"  run manifest: {manifest_path}")
+        print("  dry run: nothing was launched.")
+        return 0
+
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.tmux):
+        raise fail(prog, f"tmux session name {args.tmux!r} is not allowed")
+    if not args.tmux.startswith(project["tmux_prefix"]):
+        raise fail(
+            prog,
+            f"tmux session name '{args.tmux}' must start with the project "
+            f"prefix '{project['tmux_prefix']}'",
+        )
+
+    run_seed = _fakelib.seed(args.project, args.tmux, task_sha)
+    run_id = f"launch-{args.project}-{run_seed}"
+    directory = run_dir(state_dir, run_id)
+    try:
+        directory.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        raise fail(prog, f"run directory already reserved: {directory}")
+    session_id = f"fable-fake-{run_seed}"
+    served_model = os.environ.get("FAKE_MODEL", project["model"])
+    stream_path = directory / "stream.jsonl"
+
+    # Register the launched tmux session as live (see module docstring).
+    tmux_dir = os.environ.get("FAKE_TMUX_DIR")
+    lane_file = Path(tmux_dir) / args.tmux if tmux_dir else None
+    if lane_file is not None:
+        lane_file.parent.mkdir(parents=True, exist_ok=True)
+        lane_file.write_text(run_id + "\n", encoding="utf-8")
+    launch_exit = os.environ.get("FAKE_LAUNCH_EXIT")
+    if launch_exit:
+        # The CLI crashed after creating the tmux session: no manifest
+        # line is printed, but the lane is alive and needs cleanup.
+        print(
+            f"{prog}: error: simulated crash after tmux session creation",
+            file=sys.stderr,
+        )
+        return int(launch_exit)
+
+    manifest = {
+        "tool": TOOL,
+        "run_id": run_id,
+        "mode": "launch",
+        "status": "pending",
+        "project": args.project,
+        "model": project["model"],
+        "session_id": session_id,
+        "expected_transcript_path": str(stream_path),
+        "tmux_session": args.tmux,
+        "payload_files_created": True,
+        "task_sha256": task_sha,
+    }
+    manifest_path = directory / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"{prog} summary")
+    print("  mode: launch")
+    print(f"  session id: {session_id}")
+    print(f"  run manifest: {manifest_path} (pending)")
+
+    # The "session": a synchronous, deterministic stream-json transcript.
+    # An early draft and a text-free tool-use event precede the final
+    # text-bearing assistant message, so extractors must really pick the
+    # FINAL text-bearing event.
+    final_text = (
+        f"# {manifest['project']} {session_id}\n\n"
+        f"Deterministic fake Claude turn (seed {run_seed}).\n\n"
+        f"{_fakelib.body(run_seed)}"
+    )
+    events = [
+        {"type": "system", "subtype": "init", "session_id": session_id},
+        {
+            "type": "assistant",
+            "session_id": session_id,
+            "message": {
+                "id": "msg_1",
+                "model": served_model,
+                "content": [{"type": "text", "text": f"DRAFT sketch {run_seed} — not the turn."}],
+            },
+        },
+        {
+            "type": "assistant",
+            "session_id": session_id,
+            "message": {
+                "id": "msg_2",
+                "model": served_model,
+                "content": [{"type": "tool_use", "id": "tool_1", "name": "Read", "input": {}}],
+            },
+        },
+        {
+            "type": "assistant",
+            "session_id": session_id,
+            "message": {
+                "id": "msg_3",
+                "model": served_model,
+                "content": [{"type": "text", "text": final_text}],
+            },
+        },
+    ]
+    if os.environ.get("FAKE_LANE_STUCK"):
+        # No terminal result: the lane is still running and its tmux
+        # session stays alive; watch --follow will block on it.
+        pass
+    elif os.environ.get("FAKE_OUTCOME"):
+        events.append(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "session_id": session_id,
+                "modelUsage": {served_model: {"outputTokens": 1}},
+            }
+        )
+    else:
+        events.append(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "stop_reason": "end_turn",
+                "session_id": session_id,
+                "modelUsage": {served_model: {"outputTokens": 42}},
+            }
+        )
+        # Successful terminal state: the lane exits and its tmux session
+        # disappears on its own.
+        if lane_file is not None:
+            lane_file.unlink(missing_ok=True)
+    stream_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+    manifest["status"] = "launched"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"  launched: fake session '{args.tmux}' (no real tmux)")
+    return 0
+
+
+def read_manifest(prog: str, raw: str) -> tuple[dict, Path]:
+    path = Path(raw)
+    if not path.is_absolute():
+        raise fail(prog, f"manifest path must be absolute, got '{raw}'")
+    if path.is_symlink() or not path.is_file():
+        raise fail(prog, f"manifest path {path} is not an existing regular file")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise fail(prog, f"cannot read manifest {path}: {exc}")
+    transcript = Path(manifest.get("expected_transcript_path", ""))
+    if not transcript.is_file():
+        raise fail(prog, f"manifest transcript {transcript} does not exist")
+    return manifest, transcript
+
+
+def scan_results(transcript: Path) -> list[dict]:
+    results = []
+    for line in transcript.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if isinstance(event, dict) and event.get("type") == "result":
+            results.append(event)
+    return results
+
+
+def cmd_watch(argv: list[str]) -> int:
+    prog = "fake-fable-session watch"
+    parser = argparse.ArgumentParser(prog=prog)
+    parser.add_argument("--manifest", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument("--follow", action="store_true")
+    parser.add_argument("--poll-interval", type=float, default=None)
+    parser.add_argument("--settle-seconds", type=float, default=None)
+    parser.add_argument("--state-file", default=None)
+    args = parser.parse_args(argv)
+    _fakelib.mark_spawn("fable-watch:" + ("follow" if args.follow else "once"))
+    _fakelib.forced_exit()
+
+    manifest, transcript = read_manifest(prog, args.manifest)
+    results = scan_results(transcript)
+    if args.follow and not results:
+        # --follow exits only at the lane's terminal state; while the
+        # lane keeps running this blocks (a caller-side timeout kills
+        # it, exactly like watching a real stuck tmux lane).
+        import time
+
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline and not results:
+            time.sleep(0.1)
+            results = scan_results(transcript)
+    session_id = manifest.get("session_id")
+    if len(results) == 1 and results[0].get("subtype") == "success" and results[0].get("is_error") is False:
+        print(json.dumps({"event": "completed", "session_id": session_id}))
+        return 0
+    if len(results) == 1:
+        print(json.dumps({"event": "completed_error", "session_id": session_id}))
+        return 1
+    if len(results) > 1:
+        print(json.dumps({"event": "completed_ambiguous", "session_id": session_id}))
+        return 1
+    print(json.dumps({"event": "interrupted", "session_id": session_id}))
+    return 1
+
+
+def cmd_audit(argv: list[str]) -> int:
+    prog = "fake-fable-session audit"
+    parser = argparse.ArgumentParser(prog=prog)
+    parser.add_argument("--manifest")
+    parser.add_argument("--transcript")
+    parser.add_argument("--requested-model")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+    _fakelib.mark_spawn(f"fable-audit:{args.format}")
+    _fakelib.forced_exit()
+
+    if args.manifest:
+        manifest, transcript = read_manifest(prog, args.manifest)
+        requested = manifest.get("model", "")
+    else:
+        if not args.transcript or not args.requested_model:
+            raise fail(prog, "provide either --manifest or both --transcript and --requested-model")
+        transcript = Path(args.transcript)
+        requested = args.requested_model
+
+    models_by_id: dict[str, str] = {}
+    final_response_model = None
+    session_ids: set[str] = set()
+    reasons: set[str] = set()
+    for line in transcript.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if not isinstance(event, dict):
+            reasons.add("non_object_line")
+            continue
+        sid = event.get("session_id") or event.get("sessionId")
+        if isinstance(sid, str) and sid:
+            session_ids.add(sid)
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message", {})
+        model = message.get("model")
+        message_id = message.get("id")
+        if not message_id:
+            reasons.add("missing_message_id")
+            continue
+        if isinstance(model, str) and model and model != "<synthetic>":
+            models_by_id[message_id] = model
+            text = "".join(
+                block.get("text", "")
+                for block in message.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if text.strip():
+                final_response_model = model
+
+    results = scan_results(transcript)
+    result_meta = None
+    if len(results) == 0:
+        reasons.add("missing_terminal_result")
+    elif len(results) > 1:
+        reasons.add("multiple_terminal_results")
+    else:
+        result = results[0]
+        result_meta = {
+            "subtype": result.get("subtype"),
+            "is_error": result.get("is_error"),
+            "stop_reason": result.get("stop_reason"),
+        }
+        if result.get("subtype") != "success" or result.get("is_error") is not False:
+            reasons.add("unsuccessful_terminal_result")
+
+    observed: dict[str, int] = {}
+    for model in models_by_id.values():
+        observed[model] = observed.get(model, 0) + 1
+    evidence_complete = not reasons
+    if not evidence_complete:
+        verdict = "UNKNOWN"
+    elif not observed or final_response_model is None:
+        verdict = "UNKNOWN"
+    elif all(model == requested for model in observed) and final_response_model == requested:
+        verdict = "PURE"
+    else:
+        verdict = "MIXED"
+
+    audit = {
+        "schema_version": 1,
+        "verdict": verdict,
+        "requested_model": requested,
+        "observed_message_models": observed,
+        "synthetic_message_count": 0,
+        "final_response_model": final_response_model,
+        "auxiliary_models": [],
+        "fallback_event_count": 0,
+        "fallback_models": [],
+        "evidence_complete": evidence_complete,
+        "reason_codes": sorted(reasons),
+        "result": result_meta,
+        "usage": None,
+        "session_ids": sorted(session_ids),
+    }
+    if args.format == "json":
+        print(json.dumps(audit, indent=2))
+    else:
+        print(f"verdict: {verdict}")
+    return {"PURE": 0, "MIXED": 1, "UNKNOWN": 2}[verdict]
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv:
+        print("usage: fake-fable-session {run,audit,watch} ...", file=sys.stderr)
+        return 2
+    head, rest = argv[0], argv[1:]
+    dispatch = {"run": cmd_run, "watch": cmd_watch, "audit": cmd_audit}
+    if head not in dispatch:
+        print(
+            f"fake-fable-session: error: unknown command '{head}' "
+            "(choose from run, audit, watch)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        return dispatch[head](rest)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

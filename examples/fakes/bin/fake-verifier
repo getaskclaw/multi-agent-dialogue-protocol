@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Deterministic fake EXTERNAL identity verifier for command workers.
+
+Stands in for an out-of-band identity collector (billing records, an
+API gateway log, a session manifest service). The adapter — never the
+worker — invokes it after the turn artifact exists; it prints one JSON
+report with the observed identity. The report always carries
+``"fake": true``: a fake collector's output must never be presented as
+real identity proof, and the adapter preserves that flag in the
+evidence proof verbatim.
+
+Usage: fake-verifier --turn TURN --round R --actor A
+Env:   FAKE_PROVIDER, FAKE_MODEL, FAKE_SESSION_SALT,
+       FAKE_VERIFIER_OUTCOME (default "success")
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fakelib  # noqa: E402
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(prog="fake-verifier")
+    parser.add_argument("--turn", required=True)
+    parser.add_argument("--round", required=True)
+    parser.add_argument("--actor", required=True)
+    args = parser.parse_args()
+
+    _fakelib.mark_spawn("verifier")
+    _fakelib.forced_exit()
+
+    turn_path = Path(args.turn)
+    if not turn_path.is_file():
+        print("fake-verifier: no turn artifact to attest", file=sys.stderr)
+        raise SystemExit(2)
+
+    salt = os.environ.get("FAKE_SESSION_SALT", "0")
+    report = {
+        "fake": True,
+        "collector": "fake-verifier",
+        "provider": os.environ.get("FAKE_PROVIDER", "fake-provider"),
+        "model": os.environ.get("FAKE_MODEL", "fake-model"),
+        "session_id": f"cmd-{_fakelib.seed(args.actor, args.round, salt)}",
+        "outcome": os.environ.get("FAKE_VERIFIER_OUTCOME", "success"),
+        "turn_sha256": hashlib.sha256(turn_path.read_bytes()).hexdigest(),
+    }
+    print(json.dumps(report))
+    raise SystemExit(0)

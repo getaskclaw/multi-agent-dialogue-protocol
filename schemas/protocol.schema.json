@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/protocol.schema.json",
+  "title": "Multi-agent dialogue protocol definition",
+  "type": "object",
+  "required": ["protocol_id", "version", "owner", "actors", "schedule", "final_round_id"],
+  "additionalProperties": false,
+  "properties": {
+    "protocol_id": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human owner name; must not equal any actor_id. Only the owner can close a dialogue."
+    },
+    "source_sha": {
+      "type": "string",
+      "description": "Frozen evidence boundary: the Git SHA (or content hash) all turns argue from."
+    },
+    "evidence_roots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Repository-relative roots workers may cite as evidence."
+    },
+    "owner_decisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "owner_proof_argv": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "Optional external owner-proof verifier command ({decision_file} is substituted). Without it, owner-decide records caller_identity as 'unverified': nothing authenticates WHO invoked the decision."
+    },
+    "actors": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["actor_id", "role", "transport", "expected_provider", "expected_model"],
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {"type": "string", "minLength": 1},
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Protocol role (what to argue). Never used to infer transport, provider, or model."
+          },
+          "transport": {
+            "type": "string",
+            "enum": ["command", "fable-session", "hermes-cli"],
+            "description": "How a turn is executed. Declared explicitly per actor."
+          },
+          "expected_provider": {"type": "string", "minLength": 1},
+          "expected_model": {"type": "string", "minLength": 1},
+          "settings": {
+            "type": "object",
+            "description": "Non-secret adapter settings. fable-session: command_name, project, registry, state_dir, tmux_prefix, plus tmux_command_name (default 'tmux') used ONLY on post-launch failure to kill-session/has-session the exact generated lane. hermes-cli: command_name, hermes_home. command: argv template plus a REQUIRED identity_verifier_argv (self-reported worker output is never identity proof). All: optional env, timeout_seconds."
+          }
+        }
+      }
+    },
+    "schedule": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Finite, explicit, ordered turn list. No repeat/unbounded markers are allowed.",
+      "items": {
+        "type": "object",
+        "required": ["round_id", "actor_id", "purpose", "artifact_kind"],
+        "additionalProperties": false,
+        "properties": {
+          "round_id": {"type": "string", "minLength": 1},
+          "actor_id": {"type": "string", "minLength": 1},
+          "purpose": {"type": "string", "minLength": 1},
+          "artifact_kind": {"type": "string", "minLength": 1},
+          "word_limit": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "final_round_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal the last scheduled round_id; turns after it fail closed."
+    }
+  },
+  "examples": [
+    {
+      "protocol_id": "example-two-worker",
+      "version": 1,
+      "owner": "owner-human",
+      "source_sha": "0000000000000000000000000000000000000000",
+      "evidence_roots": ["docs/"],
+      "owner_decisions": ["APPROVE", "REJECT", "NEED_MORE_EVIDENCE"],
+      "actors": [
+        {
+          "actor_id": "worker-a",
+          "role": "proposer",
+          "transport": "command",
+          "expected_provider": "provider-a",
+          "expected_model": "model-a",
+          "settings": {
+            "argv": ["fake-worker", "--task", "{task_file}", "--turn-output", "{turn_file}"],
+            "identity_verifier_argv": ["fake-verifier", "--turn", "{turn_file}"]
+          }
+        },
+        {
+          "actor_id": "worker-b",
+          "role": "challenger",
+          "transport": "command",
+          "expected_provider": "provider-b",
+          "expected_model": "model-b",
+          "settings": {
+            "argv": ["fake-worker", "--task", "{task_file}", "--turn-output", "{turn_file}"],
+            "identity_verifier_argv": ["fake-verifier", "--turn", "{turn_file}"]
+          }
+        }
+      ],
+      "schedule": [
+        {"round_id": "R01", "actor_id": "worker-a", "purpose": "propose", "artifact_kind": "proposal", "word_limit": 700},
+        {"round_id": "R02", "actor_id": "worker-b", "purpose": "challenge", "artifact_kind": "challenge", "word_limit": 700}
+      ],
+      "final_round_id": "R02"
+    }
+  ]
+}
