@@ -278,6 +278,24 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
     except adapters.AdapterError as exc:
         raise engine.ProtocolError(str(exc)) from exc
 
+    # Capability gate: when the definition requires capabilities, the
+    # engine probes them from the CLI itself and refuses the launch
+    # before any claim or runtime spawn.
+    required = context.actor.required_capabilities
+    if required:
+        manifest = adapter.probe_capabilities(context)
+        missing = [
+            name
+            for name in required
+            if not manifest["capabilities"].get(name, {}).get("ok")
+        ]
+        if missing:
+            raise engine.ProtocolError(
+                f"actor {actor_id!r} requires capabilities the probed CLI "
+                f"does not show: {missing}; launch refused before any "
+                "runtime spawn"
+            )
+
     dialogue.claim(actor_id)
     # Forensics are best-effort: a receipt that cannot be written must
     # never hold a claim hostage or block a turn the ledger can prove.

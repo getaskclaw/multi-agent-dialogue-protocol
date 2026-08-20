@@ -200,6 +200,87 @@ class Adapter(ABC):
         """
         return None
 
+    def capability_probes(
+        self, context: PrepareContext
+    ) -> dict[str, tuple[list[str], "object"]]:
+        """Extra CLI capability probes: name -> (argv, check).
+
+        ``check`` receives (full_output, returncode) and returns bool.
+        Every probe is run by the engine against the real CLI — the
+        adapter only names WHAT to probe, never reports its own support.
+        """
+        return {}
+
+    def _run_capability_probe(
+        self,
+        argv: list[str],
+        check,
+        context: PrepareContext,
+        where: str,
+    ) -> dict:
+        """Run one bounded capability probe under the actor's env.
+
+        cwd is the dialogue directory (always exists) so the pre-launch
+        gate can probe before the turn's work directory is created.
+        """
+        try:
+            probe_env = substitute_env(
+                context.actor.settings.get("env"), context.placeholders(), where
+            )
+            result = run_command(
+                argv, env=probe_env, cwd=context.dialogue_dir,
+                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+                what=f"{where}: capability probe {' '.join(argv[:2])}",
+            )
+        except AdapterError as exc:
+            return {"ok": False, "error": str(exc), "probe": {"argv": list(argv)}}
+        raw_output = (result.stdout or result.stderr or "")
+        try:
+            ok = bool(check(raw_output, result.returncode))
+        except Exception as exc:  # a broken check must fail closed, not crash
+            return {
+                "ok": False,
+                "error": f"capability check failed: {exc}",
+                "probe": {"argv": list(argv)},
+            }
+        return {
+            "ok": ok,
+            "probe": {
+                "argv": list(argv),
+                "exit_status": result.returncode,
+                "output": raw_output.strip()[:500],
+                "output_sha256": artifacts.sha256_bytes(
+                    raw_output.encode("utf-8")
+                ),
+            },
+        }
+
+    def probe_capabilities(self, context: PrepareContext) -> dict:
+        """Build the capability manifest by probing the CLI itself.
+
+        ``cli-version`` is always probed when the adapter names a version
+        argv; adapter-specific probes come from ``capability_probes``.
+        """
+        where = f"actor {context.actor.actor_id!r} ({self.name})"
+        capabilities: dict[str, dict] = {}
+        try:
+            version_argv = self.version_probe_argv(context)
+        except AdapterError as exc:
+            capabilities["cli-version"] = {"ok": False, "error": str(exc)}
+        else:
+            if version_argv is not None:
+                capabilities["cli-version"] = self._run_capability_probe(
+                    version_argv,
+                    lambda output, rc: rc == 0,
+                    context,
+                    where,
+                )
+        for name, (argv, check) in self.capability_probes(context).items():
+            capabilities[name] = self._run_capability_probe(
+                argv, check, context, where
+            )
+        return {"capabilities": capabilities, "probed_at": utc_now()}
+
     def cli_version_evidence(self, context: PrepareContext) -> dict | None:
         """Probe the adapter CLI version for the evidence record.
 
@@ -270,6 +351,11 @@ class Adapter(ABC):
         cli_version = self.cli_version_evidence(context)
         if cli_version is not None:
             record["cli_version"] = cli_version
+        if context.actor.required_capabilities:
+            # The manifest is probed from the CLI at execution time and
+            # rides inside the hashed evidence record; the pre-launch
+            # gate probed the same surface before any spawn.
+            record["capability_manifest"] = self.probe_capabilities(context)
         return record
 
 

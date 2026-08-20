@@ -60,6 +60,12 @@
           },
           "expected_provider": {"type": "string", "minLength": 1},
           "expected_model": {"type": "string", "minLength": 1},
+          "required_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "enum": ["cli-version", "one-shot-source-tagging"]},
+            "description": "Controlled capability vocabulary. Before any runtime spawn the engine probes each listed capability from the CLI itself (never adapter self-report) and refuses the launch when the probed manifest lacks one. cli-version: '<cli> --version' exits 0. one-shot-source-tagging (hermes-cli): '<cli> chat --help' shows -q/--source/--pass-session-id."
+          },
           "settings": {
             "type": "object",
             "description": "Non-secret adapter settings. fable-session: command_name, project, registry, state_dir, tmux_prefix, plus tmux_command_name (default 'tmux') used ONLY on post-launch failure to kill-session/has-session the exact generated lane. hermes-cli: command_name, hermes_home. command: argv template plus a REQUIRED identity_verifier_argv (self-reported worker output is never identity proof). All: optional env, timeout_seconds."

@@ -238,5 +238,39 @@ class EvidenceVersionsDefinitionTests(unittest.TestCase):
             config.parse_definition(raw)
 
 
+class RequiredCapabilitiesDefinitionTests(unittest.TestCase):
+    """Actor required_capabilities use the controlled vocabulary only."""
+
+    def test_default_is_empty(self) -> None:
+        definition = config.parse_definition(support.two_actor_definition())
+        self.assertEqual(definition.actor("worker-a").required_capabilities, ())
+
+    def test_known_capability_accepted(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"][0]["required_capabilities"] = ["cli-version"]
+        definition = config.parse_definition(raw)
+        self.assertEqual(
+            definition.actor("worker-a").required_capabilities, ("cli-version",)
+        )
+
+    def test_unknown_capability_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"][0]["required_capabilities"] = ["teleport"]
+        with self.assertRaisesRegex(config.ConfigError, "unknown required_capabilities"):
+            config.parse_definition(raw)
+
+    def test_duplicate_capabilities_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"][0]["required_capabilities"] = ["cli-version", "cli-version"]
+        with self.assertRaisesRegex(config.ConfigError, "duplicates"):
+            config.parse_definition(raw)
+
+    def test_non_string_capability_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"][0]["required_capabilities"] = [1]
+        with self.assertRaisesRegex(config.ConfigError, "list of strings"):
+            config.parse_definition(raw)
+
+
 if __name__ == "__main__":
     unittest.main()

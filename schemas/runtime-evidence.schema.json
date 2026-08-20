@@ -132,6 +132,39 @@
           "type": "string"
         }
       }
+    },
+    "capability_manifest": {
+      "type": "object",
+      "description": "Engine-probed adapter capability manifest, present when the actor declares required_capabilities. Each capability entry carries ok plus the probe record (argv, exit_status, truncated output, output_sha256 over the full output) or an error. Probed from the CLI by the engine, never adapter self-report.",
+      "additionalProperties": false,
+      "required": ["capabilities", "probed_at"],
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "propertyNames": {"enum": ["cli-version", "one-shot-source-tagging"]},
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ok"],
+            "properties": {
+              "ok": {"type": "boolean"},
+              "error": {"type": "string"},
+              "probe": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["argv"],
+                "properties": {
+                  "argv": {"type": "array", "items": {"type": "string"}},
+                  "exit_status": {"type": "integer"},
+                  "output": {"type": "string"},
+                  "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
+              }
+            }
+          }
+        },
+        "probed_at": {"type": "string"}
+      }
     }
   },
   "examples": [

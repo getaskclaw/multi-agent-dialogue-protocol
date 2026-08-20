@@ -112,6 +112,26 @@ class HermesAdapter(Adapter):
         command_name = require_str_setting(settings, "command_name", where)
         return [command_name, "--version"]
 
+    def capability_probes(
+        self, context: PrepareContext
+    ) -> dict[str, tuple[list[str], "object"]]:
+        settings = context.actor.settings
+        where = f"actor {context.actor.actor_id!r} (hermes)"
+        command_name = require_str_setting(settings, "command_name", where)
+        return {
+            # The one-shot contract surface, probed from the real CLI's
+            # own chat --help (verified against Hermes v0.20).
+            "one-shot-source-tagging": (
+                [command_name, "chat", "--help"],
+                lambda output, rc: (
+                    rc == 0
+                    and "--source" in output
+                    and "--pass-session-id" in output
+                    and "-q" in output
+                ),
+            )
+        }
+
     def _argv(self, command_name: str, prompt: str, source: str) -> tuple[str, ...]:
         return (
             command_name,

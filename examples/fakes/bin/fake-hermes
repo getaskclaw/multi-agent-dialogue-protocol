@@ -121,6 +121,15 @@ def main() -> int:
     if argv == ["--version"]:
         print("fake-hermes 1.1.0 (fixture)")
         return 0
+    if argv == ["chat", "--help"] or argv == ["chat", "-h"]:
+        # Mirrors the real v0.20 one-shot surface (verified against
+        # `hermes chat --help`).
+        print(
+            "usage: hermes chat [-h] [-q QUERY | --query-file PATH] "
+            "[-m MODEL] [-Q] [--pass-session-id] [--source SOURCE] "
+            "[--resume SESSION_ID]"
+        )
+        return 0
     if not argv or argv[0] != "chat":
         print(
             "fake-hermes: error: this fixture only implements the real "
