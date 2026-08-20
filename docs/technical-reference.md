@@ -48,6 +48,16 @@ madp owner-decide DIR --decision DECISION.md
 turn; it is not a required transition. Automatic multi-turn loops are
 deliberately out of scope; every launch is one explicit turn.
 
+Two auxiliary read-only/local commands sit outside the production
+path: **`madp report DIR`** derives the evidence index on demand (one
+row per accepted turn: commit SHA, recorded vs recomputed digests,
+provider/model/session, probed CLI version) — never committed, never
+read by acceptance or validation logic, and a tampered artifact or
+evidence file is flagged here AND by `validate` independently;
+**`madp canary --adapter A --dialogue DIR`** runs one turn through the
+real acceptance path in a fresh local dialogue and validates it with
+the production gate (always local-only).
+
 ```bash
 python3 -m unittest discover -s tests   # full suite (PYTHONPATH=src, or run scripts/verify.py)
 python3 scripts/verify.py               # compile + tests + schemas + secret scan + git hygiene
@@ -86,6 +96,17 @@ manually controlled recovery.
 - **no recovery operation releases or completes a `BLOCKED`
   dialogue** — claim, release, and complete all refuse it; recovery
   from `BLOCKED` is a human decision outside the protocol.
+
+**Run-attempt receipts**: every `run --launch` writes a
+`run-attempt-receipt` JSON under `work/run-attempts/` — before the
+process starts (`outcome: in_flight`, argv digest only, never the
+plaintext argv; runner pid; start time) and again when the attempt
+finalizes (`completed`/`failed`, exit status, claim-cleanup state).
+The directory is Git-ignored: receipts are crash forensics for the
+recovery path, **never** ledger content, and nothing in acceptance or
+validation reads them. A receipt stuck at `in_flight` names the
+attempt that never reported an outcome — the ledger stays the
+authority on what actually completed.
 
 ## Completion provenance (`completed_via`)
 

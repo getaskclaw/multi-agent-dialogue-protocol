@@ -789,6 +789,102 @@ class Dialogue:
             "errors": errors,
         }
 
+    def build_report(self) -> dict:
+        """Derived evidence index over the accepted ledger.
+
+        On-demand and read-only: the report is never committed and never
+        read by acceptance or validation logic. Digests are re-derived
+        from the raw published files, so a tampered byte is flagged here
+        AND by ``validate`` independently.
+        """
+        state = self.state()
+        definition = self.definition()
+        provenance = self._git_provenance(True, state)
+        commits = {
+            entry.get("round_id"): entry
+            for entry in provenance.get("turn_commits") or []
+        }
+        rows: list[dict] = []
+        mismatches: list[str] = []
+        for record in state.get("completed_turns", []):
+            round_id = record.get("round_id")
+            row: dict = {
+                "round_id": round_id,
+                "actor_id": record.get("actor_id"),
+                "completed_via": record.get("completed_via"),
+                "commit": (commits.get(round_id) or {}).get("commit"),
+                "artifact_file": record.get("artifact_file"),
+                "artifact_sha256": record.get("artifact_sha256"),
+                "evidence_file": record.get("evidence_file"),
+                "evidence_sha256": record.get("evidence_sha256"),
+                "session_id": record.get("session_id"),
+                "completed_at": record.get("completed_at"),
+            }
+            for file_key, sha_key, label in (
+                ("artifact_file", "artifact_sha256", "artifact"),
+                ("evidence_file", "evidence_sha256", "evidence"),
+            ):
+                recorded = record.get(sha_key)
+                try:
+                    actual = artifacts.sha256_file(
+                        self.directory / record[file_key]
+                    )
+                except Exception as exc:  # read-only report must not crash
+                    mismatches.append(
+                        f"turn {round_id}: {label} unreadable: {exc}"
+                    )
+                    row[f"{label}_digest_ok"] = False
+                    continue
+                row[f"{label}_digest_ok"] = actual == recorded
+                if actual != recorded:
+                    mismatches.append(
+                        f"turn {round_id}: {label} digest mismatch — "
+                        f"recorded {recorded!r}, file now hashes {actual!r}"
+                    )
+            # Index fields re-read from the raw evidence bytes.
+            try:
+                turn_evidence = evidence.load_evidence(
+                    self.directory / record["evidence_file"]
+                )
+            except evidence.EvidenceError as exc:
+                mismatches.append(f"turn {round_id}: evidence unreadable: {exc}")
+                row["evidence_index"] = None
+            else:
+                cli_version = turn_evidence.get("cli_version") or None
+                row["evidence_index"] = {
+                    "evidence_version": turn_evidence.get("evidence_version"),
+                    "adapter": turn_evidence.get("adapter"),
+                    "provider": turn_evidence.get("provider"),
+                    "model": turn_evidence.get("model"),
+                    "outcome": turn_evidence.get("outcome"),
+                    "cli_version": (
+                        None
+                        if cli_version is None
+                        else {
+                            "output": cli_version.get("output"),
+                            "output_sha256": cli_version.get("output_sha256"),
+                        }
+                    ),
+                }
+            rows.append(row)
+        provenance_errors = list(provenance.get("errors") or [])
+        return {
+            "ok": not mismatches and not provenance_errors,
+            "protocol_id": state.get("protocol_id"),
+            "status": state.get("status"),
+            "definition_digest": definition.digest(),
+            "turn_count": len(rows),
+            "turns": rows,
+            "mismatches": mismatches,
+            "provenance_errors": provenance_errors,
+            "derived": True,
+            "note": (
+                "derived on demand from the accepted commits and raw "
+                "files; never committed, never read by acceptance or "
+                "validation logic"
+            ),
+        }
+
     def _git_provenance(self, require_git: bool, state: dict) -> dict:
         import subprocess
 

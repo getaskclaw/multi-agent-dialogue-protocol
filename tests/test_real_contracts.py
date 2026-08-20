@@ -1303,5 +1303,139 @@ class CommandCliVersionTests(CommandFixtureBase):
         self.assertEqual(dialogue.state()["turn_index"], 1)
 
 
+class RunAttemptReceiptTests(CommandFixtureBase):
+    """Run-attempt receipts: crash forensics in the gitignored work/
+    namespace — never committed to the ledger, never read by acceptance."""
+
+    def _settings(self) -> dict:
+        return {
+            "argv": self.worker_argv(),
+            "identity_verifier_argv": self.verifier_argv(),
+            "env": {
+                "FAKE_PROVIDER": "fake-provider-a",
+                "FAKE_MODEL": "fake-model-a",
+                "FAKE_SPAWN_MARKER": str(self.marker),
+            },
+        }
+
+    def _receipts(self, dialogue: engine.Dialogue) -> list[Path]:
+        directory = dialogue.directory / "work" / "run-attempts"
+        if not directory.is_dir():
+            return []
+        return sorted(directory.glob("*.json"))
+
+    def test_completed_turn_writes_finalized_receipt(self) -> None:
+        dialogue = self.make_dialogue(self._settings())
+        runner.launch(dialogue, "worker-a")
+        receipts = self._receipts(dialogue)
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(receipt["kind"], "run-attempt-receipt")
+        self.assertEqual(receipt["round_id"], "R01")
+        self.assertEqual(receipt["actor_id"], "worker-a")
+        self.assertEqual(receipt["outcome"], "completed")
+        self.assertEqual(receipt["exit_status"], 0)
+        self.assertEqual(receipt["cleanup"], "claim-consumed-by-completion")
+        self.assertEqual(receipt["runner_pid"], os.getpid())
+        self.assertIsNotNone(receipt["finalized_at"])
+        self.assertEqual(len(receipt["argv_sha256"]), 64)
+        self.assertNotIn("argv", receipt, "redacted: digest only")
+
+    def test_failed_turn_receipt_records_claim_release(self) -> None:
+        settings = self._settings()
+        settings["env"]["FAKE_EXIT"] = "1"
+        dialogue = self.make_dialogue(settings)
+        with self.assertRaises((engine.ProtocolError, adapters.AdapterError)):
+            runner.launch(dialogue, "worker-a")
+        receipts = self._receipts(dialogue)
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(receipt["outcome"], "failed")
+        self.assertEqual(receipt["cleanup"], "claim-released")
+        self.assertIn("exited 1", receipt["detail"])
+
+    def test_receipt_never_enters_the_ledger(self) -> None:
+        dialogue = self.make_dialogue(self._settings())
+        runner.launch(dialogue, "worker-a")
+        tracked = support.git(dialogue.directory, "ls-files").stdout
+        self.assertNotIn("run-attempts", tracked)
+        report = dialogue.validate(
+            require_git=True, require_runner_completion=True
+        )
+        self.assertTrue(report["ok"], report["errors"])
+
+
+class BuildReportTests(CommandFixtureBase):
+    """`madp report`: derived evidence index — read-only, never committed."""
+
+    def _settings(self) -> dict:
+        return {
+            "argv": self.worker_argv(),
+            "identity_verifier_argv": self.verifier_argv(),
+            "env": {
+                "FAKE_PROVIDER": "fake-provider-a",
+                "FAKE_MODEL": "fake-model-a",
+                "FAKE_SPAWN_MARKER": str(self.marker),
+            },
+        }
+
+    def test_report_indexes_accepted_turns(self) -> None:
+        dialogue = self.make_dialogue(self._settings())
+        runner.launch(dialogue, "worker-a")
+        report = dialogue.build_report()
+        self.assertTrue(report["ok"], report["mismatches"])
+        self.assertEqual(report["turn_count"], 1)
+        row = report["turns"][0]
+        self.assertEqual(row["round_id"], "R01")
+        self.assertEqual(row["completed_via"], "runner-launch")
+        self.assertTrue(row["artifact_digest_ok"])
+        self.assertTrue(row["evidence_digest_ok"])
+        self.assertEqual(len(row["commit"]), 40)
+        index = row["evidence_index"]
+        self.assertEqual(index["provider"], "fake-provider-a")
+        self.assertEqual(index["model"], "fake-model-a")
+        self.assertEqual(index["evidence_version"], 1)
+        self.assertIn("fake-worker", index["cli_version"]["output"])
+
+    def test_tampered_evidence_is_flagged_by_report_and_validate(self) -> None:
+        dialogue = self.make_dialogue(self._settings())
+        runner.launch(dialogue, "worker-a")
+        evidence_file = (
+            dialogue.directory
+            / dialogue.state()["completed_turns"][0]["evidence_file"]
+        )
+        payload = json.loads(evidence_file.read_text(encoding="utf-8"))
+        payload["model"] = "tampered-model"
+        evidence_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        report = dialogue.build_report()
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("evidence digest mismatch" in m for m in report["mismatches"])
+        )
+        # validate re-checks the raw evidence independently of the report.
+        validation = dialogue.validate(require_git=True)
+        self.assertFalse(validation["ok"])
+
+    def test_report_is_read_only(self) -> None:
+        dialogue = self.make_dialogue(self._settings())
+        runner.launch(dialogue, "worker-a")
+        before = support.git(
+            dialogue.directory, "rev-list", "--count", "HEAD"
+        ).stdout.strip()
+        dialogue.build_report()
+        after = support.git(
+            dialogue.directory, "rev-list", "--count", "HEAD"
+        ).stdout.strip()
+        self.assertEqual(before, after, "report never commits")
+        status = support.git(
+            dialogue.directory, "status", "--porcelain", "--", "dialogue"
+        ).stdout.strip()
+        self.assertEqual(status, "", "report leaves the worktree untouched")
+
+
 if __name__ == "__main__":
     unittest.main()

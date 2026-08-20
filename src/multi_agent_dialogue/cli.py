@@ -142,6 +142,12 @@ def cmd_owner_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    report = engine.Dialogue(args.dialogue).build_report()
+    _emit(report)
+    return 0 if report["ok"] else 1
+
+
 def cmd_canary(args: argparse.Namespace) -> int:
     report = canary.run_canary(
         args.dialogue,
@@ -214,6 +220,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dialogue", type=Path)
     p.add_argument("--decision", required=True, type=Path)
     p.set_defaults(func=cmd_owner_decide)
+
+    p = sub.add_parser(
+        "report",
+        help="derive the evidence index on demand (read-only; never "
+             "committed, never read by acceptance logic)",
+    )
+    p.add_argument("dialogue", type=Path)
+    p.set_defaults(func=cmd_report)
 
     p = sub.add_parser(
         "canary",

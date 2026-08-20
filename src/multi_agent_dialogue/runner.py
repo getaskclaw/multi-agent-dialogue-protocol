@@ -20,11 +20,100 @@ shape serves every transport.
 from __future__ import annotations
 
 import json
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import adapters, artifacts, config, engine
 
 WORK_DIR = "work"
+
+# Run-attempt receipts live under work/ — the gitignored transient
+# namespace — so they NEVER enter the ledger: they are crash forensics
+# for the recovery path, not acceptance input. Nothing in the acceptance
+# or validation logic reads them.
+RUN_ATTEMPTS_DIR = "run-attempts"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _receipt_path(context: adapters.PrepareContext, token: str) -> Path:
+    return (
+        context.work_dir.parent
+        / RUN_ATTEMPTS_DIR
+        / f"{context.turn.round_id}-{context.actor.actor_id}-{token}.json"
+    )
+
+
+def _write_receipt(path: Path, receipt: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    engine.atomic_write_json(path, receipt)
+
+
+def _start_receipt(
+    context: adapters.PrepareContext, packet: adapters.CommandPacket
+) -> tuple[Path, dict]:
+    """Write the in-flight receipt BEFORE any process starts.
+
+    If the orchestrator is killed mid-turn, this receipt is what names
+    the attempt afterwards: round, actor, argv digest (never the
+    plaintext argv — it embeds the briefing), runner pid, start time.
+    A receipt that still says ``in_flight`` means the attempt never
+    reported an outcome.
+    """
+    started = time.time()
+    receipt = {
+        "kind": "run-attempt-receipt",
+        "round_id": context.turn.round_id,
+        "actor_id": context.actor.actor_id,
+        "adapter": context.actor.transport,
+        "argv_sha256": artifacts.sha256_bytes(
+            config.canonical_json(list(packet.argv)).encode("utf-8")
+        ),
+        "runner_pid": os.getpid(),
+        "started_at": _utc_now(),
+        "finalized_at": None,
+        "outcome": "in_flight",
+        "exit_status": None,
+        "cleanup": "pending",
+        "detail": None,
+    }
+    path = _receipt_path(context, f"{int(started * 1000):x}")
+    _write_receipt(path, receipt)
+    return path, receipt
+
+
+def _finalize_receipt(
+    path: Path,
+    receipt: dict,
+    *,
+    outcome: str,
+    cleanup: str,
+    exit_status: int | None = None,
+    detail: str | None = None,
+) -> None:
+    """Best-effort outcome stamp; the ledger stays the authority.
+
+    A failed finalize leaves the receipt ``in_flight`` — itself a
+    truthful "no outcome was recorded" signal — and must never mask the
+    real outcome of the turn.
+    """
+    receipt.update(
+        {
+            "finalized_at": _utc_now(),
+            "outcome": outcome,
+            "exit_status": exit_status,
+            "cleanup": cleanup,
+            "detail": detail,
+        }
+    )
+    try:
+        _write_receipt(path, receipt)
+    except Exception:
+        pass
 
 
 def _context_for(
@@ -184,6 +273,7 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
         raise engine.ProtocolError(str(exc)) from exc
 
     dialogue.claim(actor_id)
+    receipt_path, receipt = _start_receipt(context, packet)
     try:
         context.work_dir.mkdir(parents=True, exist_ok=True)
         briefing = build_task_briefing(
@@ -216,20 +306,39 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
             context.evidence_file,
             completed_via=engine.COMPLETED_VIA_RUNNER_LAUNCH,
         )
+        _finalize_receipt(
+            receipt_path, receipt,
+            outcome="completed",
+            cleanup="claim-consumed-by-completion",
+            exit_status=record.get("exit_status"),
+        )
     except adapters.CleanupUnprovenError as exc:
         # The external worker lane may still be alive. Releasing the claim
         # would let a retry start a duplicate worker beside it, so the
         # claim and its lock stay in place and the dialogue locks BLOCKED
         # (release() refuses BLOCKED dialogues) until a human resolves it.
+        _finalize_receipt(
+            receipt_path, receipt,
+            outcome="failed",
+            cleanup="claim-retained-blocked",
+            detail=str(exc),
+        )
         dialogue.block(f"unproven worker-lane cleanup: {exc}")
         raise engine.ProtocolError(str(exc)) from exc
-    except BaseException:
+    except BaseException as exc:
         # Fail closed but leave the turn claimable again: the adapter has
         # already proven that no worker lane survived this failure.
+        cleanup = "claim-released"
         try:
             dialogue.release(actor_id)
         except engine.ProtocolError:
-            pass
+            cleanup = "release-failed"
+        _finalize_receipt(
+            receipt_path, receipt,
+            outcome="failed",
+            cleanup=cleanup,
+            detail=str(exc),
+        )
         raise
     return {
         "dry_run": False,
