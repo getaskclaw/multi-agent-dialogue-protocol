@@ -305,8 +305,15 @@ class HermesAdapter(Adapter):
                 # they say nothing about which model reasoned the turn.
                 # Older Hermes state.db schemas have no task column; there
                 # every usage row is a main-conversation call.
+                # Column names are matched case-insensitively (SQLite
+                # resolves identifiers the same way) so an oddly-cased
+                # "Task" column still triggers the filter instead of
+                # silently reverting to all-rows counting. Consequence for
+                # consumers: on task-column schemas, api_call_count covers
+                # main-conversation calls only; auxiliary calls are
+                # excluded from the count by design.
                 cols = {
-                    row[1]
+                    str(row[1]).lower()
                     for row in con.execute(
                         "PRAGMA table_info(session_model_usage)"
                     ).fetchall()

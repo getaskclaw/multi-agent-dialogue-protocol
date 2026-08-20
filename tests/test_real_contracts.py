@@ -864,6 +864,16 @@ class HermesUsageTaskFilterTests(HermesTerminalFieldMatrixTests):
         self.assert_refused("not exactly one model")
 
 
+class HermesUsageOddlyCasedTaskColumnTests(HermesUsageTaskFilterTests):
+    """SQLite resolves identifiers case-insensitively; a schema declaring
+    the column as ``Task`` must still trigger the main-conversation
+    filter instead of silently reverting to all-rows counting."""
+
+    SCHEMA = HermesUsageTaskFilterTests.SCHEMA.replace(
+        "task TEXT DEFAULT ''", '"Task" TEXT DEFAULT \'\''
+    )
+
+
 class CommandIdentityTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
