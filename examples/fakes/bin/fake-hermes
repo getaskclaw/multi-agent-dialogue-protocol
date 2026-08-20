@@ -28,6 +28,10 @@ a dirty terminal: ended_at set, end_reason='error'), FAKE_ENDED
 FAKE_API_CALLS (usage api_call_count, default 1), FAKE_STDOUT_LIE
 (stdout differs from the database), FAKE_EXTRA_SESSION (second session
 with the same source), FAKE_MULTI_MODEL (second observed model),
+FAKE_LATE_ASSISTANT (extra ACTIVE assistant row timestamped an hour
+after the run — outside the invocation window),
+FAKE_FOLLOWUP_USER (extra ACTIVE user row after the final assistant
+message — the session continued beyond the turn),
 FAKE_SPAWN_MARKER, FAKE_EXIT, FAKE_WORD_COUNT.
 """
 
@@ -189,6 +193,26 @@ def main() -> int:
             "api_call_count) VALUES (?, ?, ?, ?)",
             (session_id, model, provider, api_calls),
         )
+        if os.environ.get("FAKE_LATE_ASSISTANT"):
+            # A later ACTIVE text-bearing assistant row timestamped well
+            # outside the invocation window: the session saw activity the
+            # launch cannot account for.
+            con.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, "
+                "active) VALUES (?, ?, ?, ?, ?)",
+                (session_id, "assistant",
+                 "LATE assistant row — written after the invocation window.",
+                 started + 3600.0, 1),
+            )
+        if os.environ.get("FAKE_FOLLOWUP_USER"):
+            # An active user row AFTER the final assistant message: the
+            # session continued with a new prompt beyond this turn.
+            con.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, "
+                "active) VALUES (?, ?, ?, ?, ?)",
+                (session_id, "user", "One more thing: ...",
+                 started + 0.004, 1),
+            )
         if os.environ.get("FAKE_MULTI_MODEL"):
             con.execute(
                 "INSERT INTO session_model_usage (session_id, model, "

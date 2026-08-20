@@ -601,6 +601,46 @@ class HermesStateDbTests(HermesTestCase):
             runner.launch(dialogue, "hermes-north")
         self.assertEqual(dialogue.state()["turn_index"], 0)
 
+    def test_late_assistant_message_fails_closed(self) -> None:
+        # Canary from the design review: a later ACTIVE assistant message
+        # outside the invocation window → the turn is rejected and nothing
+        # commits.
+        dialogue = self.make_dialogue(env_north={"FAKE_LATE_ASSISTANT": "1"})
+        with self.assertRaises(engine.ProtocolError):
+            runner.launch(dialogue, "hermes-north")
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+        self.assertEqual(dialogue.state()["completed_turns"], [])
+
+    def test_followup_user_message_fails_closed(self) -> None:
+        dialogue = self.make_dialogue(env_north={"FAKE_FOLLOWUP_USER": "1"})
+        with self.assertRaises(engine.ProtocolError):
+            runner.launch(dialogue, "hermes-north")
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
+    def test_message_boundary_recorded_in_proof(self) -> None:
+        dialogue = self.make_dialogue()
+        runner.launch(dialogue, "hermes-north")
+        proof = self.evidence_for(dialogue, 0)["proof"]
+        boundary = proof["message_boundary"]
+        # user prompt + interim draft + final + inactive ghost tail.
+        self.assertEqual(boundary["session_row_count"], 4)
+        self.assertLess(
+            boundary["first_message_id"], boundary["final_message_id"]
+        )
+        # The final id is the max ACTIVE text-bearing assistant row; the
+        # inactive ghost tail never counts.
+        con = sqlite3.connect(proof["state_db"])
+        try:
+            row = con.execute(
+                "SELECT MAX(id) FROM messages WHERE session_id = ? "
+                "AND role = 'assistant' AND active = 1 "
+                "AND content IS NOT NULL AND content != ''",
+                (proof["session_id"],),
+            ).fetchone()
+        finally:
+            con.close()
+        self.assertEqual(boundary["final_message_id"], row[0])
+
 
 class HermesOneShotTerminalTests(HermesTestCase):
     """Compatibility when a clean one-shot leaves terminal fields NULL."""
@@ -799,6 +839,63 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
     def test_start_outside_window_is_rejected_even_with_null_terminal(self) -> None:
         self.build_db(started_at=self.before - 120.0)
         self.assert_refused("outside this")
+
+    # -- message boundary -------------------------------------------------
+
+    def add_message_row(self, role: str, content: str, timestamp: float,
+                        active: int = 1) -> None:
+        con = sqlite3.connect(self.db)
+        try:
+            con.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, "
+                "active) VALUES ('sess-1', ?, ?, ?, ?)",
+                (role, content, timestamp, active),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def test_message_outside_invocation_window_is_rejected(self) -> None:
+        self.build_db()
+        self.add_message_row("assistant", "late write", self.after + 120.0)
+        self.assert_refused("outside this invocation window")
+
+    def test_user_message_after_final_assistant_is_rejected(self) -> None:
+        self.build_db()
+        self.add_message_row("user", "follow-up prompt", self.before + 2.0)
+        self.assert_refused("message boundary")
+
+    def test_active_tool_row_after_final_assistant_is_rejected(self) -> None:
+        # ANY active tail row — not just user prompts — breaks the
+        # boundary: the session continued past the answer.
+        self.build_db()
+        self.add_message_row("tool", "tool output", self.before + 2.0)
+        self.assert_refused("continued beyond this turn")
+
+    def test_inactive_tail_row_is_accepted(self) -> None:
+        # Compaction ghosts (inactive rows after the final message) are
+        # normal one-shot noise and stay accepted.
+        self.build_db()
+        self.add_message_row("assistant", "ghost", self.before + 2.0,
+                             active=0)
+        observed = self.observe()
+        self.assertEqual(observed["final_message"], "The final answer.")
+        self.assertEqual(observed["message_boundary"]["session_row_count"], 2)
+
+    def test_message_without_usable_timestamp_is_rejected(self) -> None:
+        self.build_db()
+        # REAL affinity stores unconvertible text as-is; float() then
+        # fails at observation time.
+        self.add_message_row("assistant", "x", "not-a-number")  # type: ignore[arg-type]
+        self.assert_refused("no usable timestamp")
+
+    def test_message_boundary_is_recorded(self) -> None:
+        self.build_db()
+        boundary = self.observe()["message_boundary"]
+        self.assertEqual(boundary["session_row_count"], 1)
+        self.assertEqual(
+            boundary["first_message_id"], boundary["final_message_id"]
+        )
 
 
 class HermesUsageTaskFilterTests(HermesTerminalFieldMatrixTests):
