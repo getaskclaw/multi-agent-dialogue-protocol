@@ -738,6 +738,15 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
         self.assertEqual(observed["ended_at"], self.before + 2.0)
         self.assertEqual(observed["end_reason"], "completed")
 
+    def test_ended_with_cli_close_reason_is_accepted(self) -> None:
+        # Hermes v0.20+ finalizes one-shot (-q/-Q) sessions with
+        # end_reason "cli_close" on normal CLI exit; it must count as a
+        # clean completion exactly like "completed".
+        self.build_db(ended_at=self.before + 2.0, end_reason="cli_close")
+        observed = self.observe()
+        self.assertEqual(observed["ended_at"], self.before + 2.0)
+        self.assertEqual(observed["end_reason"], "cli_close")
+
     def test_ended_with_unset_reason_is_accepted(self) -> None:
         for reason in (None, ""):
             with self.subTest(reason=reason):
@@ -787,6 +796,82 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
     def test_start_outside_window_is_rejected_even_with_null_terminal(self) -> None:
         self.build_db(started_at=self.before - 120.0)
         self.assert_refused("outside this")
+
+
+class HermesUsageTaskFilterTests(HermesTerminalFieldMatrixTests):
+    """Auxiliary usage rows (title generation, vision, compression, ...)
+    share session_model_usage with the main turn under a non-empty task;
+    they must not pollute the actor's model/provider identity."""
+
+    SCHEMA = """
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT,
+        model_config TEXT, started_at REAL NOT NULL, ended_at REAL,
+        end_reason TEXT, billing_provider TEXT, profile_name TEXT
+    );
+    CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
+        timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+        compacted INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE session_model_usage (
+        session_id TEXT NOT NULL, model TEXT NOT NULL,
+        billing_provider TEXT NOT NULL DEFAULT '',
+        api_call_count INTEGER NOT NULL DEFAULT 0,
+        task TEXT DEFAULT ''
+    );
+    """
+
+    def add_usage_row(self, model: str, provider: str, calls: int,
+                      task: str) -> None:
+        con = sqlite3.connect(self.db)
+        try:
+            con.execute(
+                "INSERT INTO session_model_usage (session_id, model, "
+                "billing_provider, api_call_count, task) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("sess-1", model, provider, calls, task),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def test_auxiliary_task_rows_do_not_pollute_identity(self) -> None:
+        self.build_db()
+        self.add_usage_row("kimi-k2.7-code", "kimi", 1, "title_generation")
+        observed = self.observe()
+        self.assertEqual(observed["models"], ["hermes-4-405b"])
+        self.assertEqual(observed["api_call_count"], 3)
+
+    def test_null_task_row_counts_as_main_conversation(self) -> None:
+        self.build_db()
+        con = sqlite3.connect(self.db)
+        try:
+            con.execute(
+                "INSERT INTO session_model_usage (session_id, model, "
+                "billing_provider, api_call_count, task) "
+                "VALUES ('sess-1', 'hermes-4-405b', 'nousresearch', 1, NULL)"
+            )
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(self.observe()["api_call_count"], 4)
+
+    def test_two_main_task_models_are_still_rejected(self) -> None:
+        self.build_db()
+        self.add_usage_row("other-model", "other-provider", 1, "")
+        self.assert_refused("not exactly one model")
+
+
+class HermesUsageOddlyCasedTaskColumnTests(HermesUsageTaskFilterTests):
+    """SQLite resolves identifiers case-insensitively; a schema declaring
+    the column as ``Task`` must still trigger the main-conversation
+    filter instead of silently reverting to all-rows counting."""
+
+    SCHEMA = HermesUsageTaskFilterTests.SCHEMA.replace(
+        "task TEXT DEFAULT ''", '"Task" TEXT DEFAULT \'\''
+    )
 
 
 class CommandIdentityTests(unittest.TestCase):

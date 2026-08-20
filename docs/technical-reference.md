@@ -252,10 +252,21 @@ usage, and records that basis in the proof (`terminal_basis`) instead
 of claiming a DB terminal state. If the terminal
 fields *are* present they must be consistent (`ended_at` inside the
 invocation window; never an `end_reason` without an `ended_at`) and
-clean (`end_reason` NULL, empty, or exactly `completed`); ambiguous
+clean (`end_reason` NULL, empty, `completed`, or — Hermes v0.20+
+one-shot finalization — `cli_close`); ambiguous
 sources, missing final messages, zero API calls, mixed models or
 providers, out-of-window starts, nonzero exits, and dirty or
 inconsistent terminal fields all fail closed.
+
+Model/provider identity and the recorded `api_call_count` come from
+`session_model_usage` **main-conversation rows only** (`task` NULL or
+empty): auxiliary Hermes calls (title generation, vision, compression,
+...) share the table under a non-empty `task` and say nothing about
+which model reasoned the turn, so they are excluded from both identity
+and the count by design. Schemas predating the `task` column keep the
+all-rows behavior (every row is a main-conversation call there). The
+column check matches SQLite semantics case-insensitively, so a schema
+declaring `"Task"` still triggers the filter.
 
 **Turn briefings**: every actor receives one `## Goal` / `## Checks` /
 `## Boundaries` / `## Report` task file (the exact sections
