@@ -19,6 +19,7 @@ cannot rewrite or veto protocol history.
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 from pathlib import Path
 
@@ -80,6 +81,11 @@ def commit_paths(
     The commit message carries machine-readable ``Madp-*`` trailers.
     Values must already be non-secret (round/actor/transport/provider/
     model/session/digests are protocol facts by design)."""
+    for key, value in trailers.items():
+        if not re.fullmatch(r"[A-Za-z0-9-]+", key):
+            raise GitError(f"unsafe Git trailer key: {key!r}")
+        if not isinstance(value, str) or "\n" in value or "\r" in value:
+            raise GitError(f"unsafe Git trailer value for {key}")
     rels = [rel_to_root(root, path) for path in paths]
     message = subject + "\n\n" + "".join(
         f"{key}: {value}\n" for key, value in trailers.items()
@@ -124,6 +130,33 @@ def committed_bytes(root: Path, commit: str, rel: str) -> bytes | None:
 def committed_sha256(root: Path, commit: str, rel: str) -> str | None:
     data = committed_bytes(root, commit, rel)
     return hashlib.sha256(data).hexdigest() if data is not None else None
+
+
+def commit_trailers(root: Path, commit: str) -> list[tuple[str, str]]:
+    """Return parsed trailers from one commit without collapsing duplicates."""
+    message = _run(["show", "-s", "--format=%B", commit], cwd=root).stdout
+    try:
+        parsed = subprocess.run(
+            ["git", "interpret-trailers", "--parse"],
+            cwd=str(root),
+            input=message,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise GitError(f"cannot run git interpret-trailers: {exc}") from exc
+    if parsed.returncode != 0:
+        raise GitError(
+            f"git interpret-trailers failed (exit {parsed.returncode})"
+        )
+    result: list[tuple[str, str]] = []
+    for line in parsed.stdout.splitlines():
+        if ": " not in line:
+            continue
+        key, value = line.split(": ", 1)
+        result.append((key, value))
+    return result
 
 
 def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:

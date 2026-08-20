@@ -23,13 +23,20 @@ madp owner-decide DIR --decision DECISION.md
    dialogue path that already contains generated files
    (`state.json`, `definition.json`, `.gitignore`).
 2. **`madp status DIR`** — one JSON response naming the current state,
-   the next scheduled actor and round, the active claim,
+   the next primary scheduled actor, every frozen-definition-preauthorized substitute
+   actor for that round, the active claim,
    `blocked_reason` (why nothing can proceed, or `null`),
    `next_legal_action` (the one thing that may legally happen next),
    and `recovered_turns` (how many completed turns carry
    caller-supplied provenance).
 3. **`madp run DIR --actor ACTOR --launch`** — executes exactly one
-   scheduled turn through its transport adapter and completes it. This
+   scheduled turn through the selected actor's transport adapter and
+   completes it. `ACTOR` must be either the primary `actor_id` or one of
+   that turn's frozen `substitute_actor_ids`. A substitute also requires
+   `--substitution-reason REASON`, where `REASON` is frozen in that turn's
+   `substitution_reasons` allowlist. A substitute keeps its own
+   actor/provider/model/session identity and never impersonates the primary.
+   This
    is the **only production-honest completion door**: it is the only
    path that records `completed_via: runner-launch`. Run it once per
    scheduled turn (dry-run is the default without `--launch`:
@@ -58,6 +65,53 @@ evidence file is flagged here AND by `validate` independently;
 real acceptance path in a fresh local dialogue and validates it with
 the production gate (always local-only).
 
+## Primary actors and frozen-definition substitutes
+
+Every schedule entry still names one primary `actor_id`. It may also name an
+ordered `substitute_actor_ids` list. Both are frozen into `definition.json`
+at initialization and therefore covered by the definition digest and init
+commit. A substitute is allowed only when:
+
+- its actor definition already exists with explicit transport, provider, and
+  model constraints;
+- its protocol `role` exactly matches the primary actor's role, so failover
+  cannot turn a challenge into another proposal or otherwise change the seat;
+- its ID appears in that exact turn's `substitute_actor_ids` list;
+- the operator explicitly selects it with `run --actor ...
+  --substitution-reason ... --launch`, using a reason code frozen in the
+  same turn's `substitution_reasons`; and
+- its adapter-derived runtime evidence matches its own constraints.
+
+The claim, adapter-derived runtime evidence, completed-turn state, command
+result, task briefing, and Git
+provenance record all separate:
+
+- `scheduled_actor_id` — the primary actor named by the schedule;
+- `actor_id` — the actual runtime actor selected for this turn;
+- `actor_selection` — `primary` or `substitute`; and
+- `substitution_reason` — `null` for the primary, otherwise the selected
+  frozen reason code.
+
+This proves preauthorization by the frozen definition, not authenticated owner
+approval and not automatic failover. MADP does not authenticate who initialized
+the definition; `owner_proof_argv` applies only to the final owner decision.
+MADP also does not diagnose a
+provider cooldown or choose a substitute on its own. An external scheduler or
+human may select an already frozen substitute after verifying the primary is
+unavailable. If the active definition did not preapprove a suitable
+substitute, do not edit it: create a new bounded continuation with a higher
+version and point its evidence roots at the prior instance.
+
+A bounded continuation may also include a structured `continuation` anchor.
+MADP then rechecks the imported artifact's SHA-256, exact publication commit,
+original dialogue HEAD, and `start_round` before initialization and on every
+state read. Mutable evidence-root paths alone are not continuation proof.
+
+When `agent_final_statuses` is configured, the final worker artifact must
+contain exactly one `Status: <VALUE>` line from that frozen enum. Those tokens
+must not overlap `owner_decisions`; reaching that status moves the dialogue to
+`READY_FOR_OWNER` but never creates an owner decision.
+
 ```bash
 python3 -m unittest discover -s tests   # full suite (PYTHONPATH=src, or run scripts/verify.py)
 python3 scripts/verify.py               # compile + tests + schemas + secret scan + git hygiene
@@ -72,8 +126,8 @@ top-level CLI. They live, together with `release`, in an explicitly
 unverified recovery namespace:
 
 ```bash
-python -m multi_agent_dialogue.unverified claim DIR --actor ACTOR [--revision N]
-python -m multi_agent_dialogue.unverified prepare DIR --actor ACTOR --output TASK.md
+python -m multi_agent_dialogue.unverified claim DIR --actor ACTOR [--substitution-reason REASON] [--revision N]
+python -m multi_agent_dialogue.unverified prepare DIR --actor ACTOR [--substitution-reason REASON] --output TASK.md
 python -m multi_agent_dialogue.unverified complete DIR --actor ACTOR --turn TURN.md --runtime-evidence EVIDENCE.json
 python -m multi_agent_dialogue.unverified release DIR --actor ACTOR
 ```
@@ -364,6 +418,8 @@ happens to see:
 - **Trailers identify the runtime and the completion door.** Commit
   messages carry non-secret machine-readable trailers:
   `Madp-Protocol`, `Madp-Event`, `Madp-Round`, `Madp-Actor`,
+  `Madp-Scheduled-Actor`, `Madp-Actor-Selection`,
+  `Madp-Substitution-Reason`,
   `Madp-Transport`, `Madp-Provider`, `Madp-Model`, `Madp-Session`,
   `Madp-Completed-Via`, `Madp-Artifact-Sha256`,
   `Madp-Evidence-Sha256` (turn commits), `Madp-Definition-Digest`
@@ -408,7 +464,9 @@ the humans or schedulers around the protocol.
 
 - claims are atomic (`O_EXCL` lock + compare-and-swap revision); two
   writers can never own one turn;
-- wrong actor, wrong round, duplicate claim, stale revision → error;
+- an actor not frozen as either the primary or an approved substitute for
+  that exact round, a missing/unapproved substitution reason, wrong round,
+  duplicate claim, or stale revision → error;
 - published turns are immutable; any byte change flips the dialogue to
   `BLOCKED` before the next completion or decision;
 - missing, malformed, or mismatched runtime evidence blocks completion;
@@ -461,7 +519,8 @@ are one local Git commit each.
 - **Same model ≠ diverse models.** Two sessions of the same
   provider/model are separate contexts and separate session IDs, but
   they are *not* model-diverse evidence, and the engine does not claim
-  otherwise.
+  otherwise. This remains true when the second session is an explicitly
+  recorded substitute actor.
 - **Model audit ≠ provider proof.** The fable audit is the authority
   for model purity of the observed stream, and the Hermes `state.db`
   records the billing provider it was configured with; neither

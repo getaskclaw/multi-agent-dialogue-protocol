@@ -26,6 +26,39 @@ class EngineTestCase(unittest.TestCase):
 
 
 class InitTests(EngineTestCase):
+    def continuation_definition(self) -> tuple[config.ProtocolDefinition, Path]:
+        artifact = self.root / "prior" / "R00-worker.md"
+        artifact.parent.mkdir()
+        artifact.write_text("# R00\n\nPublished prior turn.\n", encoding="utf-8")
+        support.git(self.root, "add", "prior/R00-worker.md")
+        support.git(self.root, "commit", "-q", "-m", "publish prior turn")
+        published = support.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        marker = self.root / "prior" / "marker.txt"
+        marker.write_text("original dialogue head\n", encoding="utf-8")
+        support.git(self.root, "add", "prior/marker.txt")
+        support.git(self.root, "commit", "-q", "-m", "close prior dialogue")
+        original_head = support.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        raw = support.two_actor_definition()
+        raw["continuation"] = {
+            "protocol_id": "prior-dialogue",
+            "round_id": "R00",
+            "artifact_path": str(artifact),
+            "artifact_sha256": engine.artifacts.sha256_file(artifact),
+            "published_commit": published,
+            "original_dialogue_head": original_head,
+            "start_round": "R01",
+        }
+        return config.parse_definition(raw), artifact
+
+    def test_continuation_anchor_is_rechecked_after_init(self) -> None:
+        self.definition, artifact = self.continuation_definition()
+        dialogue = self.init_dialogue()
+        self.assertEqual(dialogue.state()["status"], "OPEN")
+        artifact.write_text("tampered prior turn\n", encoding="utf-8")
+        with self.assertRaises(engine.ProtocolError) as ctx:
+            dialogue.state()
+        self.assertIn("continuation artifact hash mismatch", str(ctx.exception))
+
     def test_init_creates_state_and_definition(self) -> None:
         dialogue = self.init_dialogue()
         self.assertTrue((self.dialogue_dir / "definition.json").is_file())
@@ -90,6 +123,25 @@ class NextTurnTests(EngineTestCase):
 
 
 class ClaimTests(EngineTestCase):
+    def enable_substitute_for_r01(self) -> None:
+        raw = support.two_actor_definition()
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "prov-c",
+                "expected_model": "model-c",
+                "settings": {
+                    "argv": ["fake-worker"],
+                    "identity_verifier_argv": ["fake-verifier"],
+                },
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        self.definition = config.parse_definition(raw)
+
     def test_correct_claim_locks_turn(self) -> None:
         dialogue = self.init_dialogue()
         state = dialogue.claim("worker-a")
@@ -103,9 +155,76 @@ class ClaimTests(EngineTestCase):
         dialogue = self.init_dialogue()
         with self.assertRaises(engine.ProtocolError) as ctx:
             dialogue.claim("worker-b")
-        self.assertIn("not the scheduled actor", str(ctx.exception))
+        self.assertIn("not an allowed actor", str(ctx.exception))
         self.assertEqual(dialogue.state()["status"], "OPEN")
         self.assertFalse((self.dialogue_dir / engine.LOCK_FILE).exists())
+
+    def test_preapproved_substitute_can_claim_without_impersonating_primary(self) -> None:
+        self.enable_substitute_for_r01()
+        dialogue = self.init_dialogue()
+        state = dialogue.claim("worker-c", substitution_reason="provider_cooldown")
+        self.assertEqual(state["claim"]["actor_id"], "worker-c")
+        self.assertEqual(state["claim"]["scheduled_actor_id"], "worker-a")
+        self.assertEqual(state["claim"]["actor_selection"], "substitute")
+        self.assertEqual(state["claim"]["substitution_reason"], "provider_cooldown")
+
+    def test_substitute_requires_frozen_reason_code(self) -> None:
+        self.enable_substitute_for_r01()
+        dialogue = self.init_dialogue()
+        with self.assertRaises(engine.ProtocolError) as missing:
+            dialogue.claim("worker-c")
+        self.assertIn("substitution reason", str(missing.exception))
+        with self.assertRaises(engine.ProtocolError) as unknown:
+            dialogue.claim("worker-c", substitution_reason="operator_preference")
+        self.assertIn("not allowed", str(unknown.exception))
+
+    def test_primary_actor_rejects_substitution_reason(self) -> None:
+        dialogue = self.init_dialogue()
+        with self.assertRaises(engine.ProtocolError) as ctx:
+            dialogue.claim("worker-a", substitution_reason="provider_cooldown")
+        self.assertIn("primary actor", str(ctx.exception))
+        self.assertIsNone(dialogue.state()["claim"])
+
+    def test_active_substitute_claim_requires_explicit_identity_fields(self) -> None:
+        self.enable_substitute_for_r01()
+        dialogue = self.init_dialogue()
+        dialogue.claim("worker-c", substitution_reason="provider_cooldown")
+        state = json.loads(dialogue.state_path.read_text(encoding="utf-8"))
+        for key in (
+            "scheduled_actor_id",
+            "actor_selection",
+            "substitution_reason",
+        ):
+            del state["claim"][key]
+        dialogue.state_path.write_text(json.dumps(state), encoding="utf-8")
+        report = dialogue.validate()
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("explicit actor identity fields" in item for item in report["errors"]),
+            report["errors"],
+        )
+
+    def test_primary_claim_on_substitute_capable_turn_is_explicit(self) -> None:
+        self.enable_substitute_for_r01()
+        dialogue = self.init_dialogue()
+        dialogue.claim("worker-a")
+        state = json.loads(dialogue.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["claim"]["scheduled_actor_id"], "worker-a")
+        self.assertEqual(state["claim"]["actor_selection"], "primary")
+        self.assertIsNone(state["claim"]["substitution_reason"])
+        for key in (
+            "scheduled_actor_id",
+            "actor_selection",
+            "substitution_reason",
+        ):
+            del state["claim"][key]
+        dialogue.state_path.write_text(json.dumps(state), encoding="utf-8")
+        report = dialogue.validate()
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("explicit actor identity fields" in item for item in report["errors"]),
+            report["errors"],
+        )
 
     def test_unknown_actor_cannot_claim(self) -> None:
         dialogue = self.init_dialogue()
@@ -150,6 +269,58 @@ class ClaimTests(EngineTestCase):
 
 
 class FinalStopTests(EngineTestCase):
+    def test_final_agent_status_is_distinct_from_owner_decision(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"] = raw["schedule"][:1]
+        raw["final_round_id"] = "R01"
+        raw["agent_final_statuses"] = [
+            "READY_FOR_OWNER",
+            "AGENT_NEEDS_MORE_EVIDENCE",
+            "SPLIT_QUESTION",
+        ]
+        self.definition = config.parse_definition(raw)
+        dialogue = self.init_dialogue()
+        dialogue.claim("worker-a")
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+        turn_path = scratch / "R01.md"
+        evidence_path = scratch / "R01.json"
+
+        def write_body(body: str) -> None:
+            turn_path.write_text(body, encoding="utf-8")
+            record = support.make_evidence(
+                actor_id="worker-a",
+                round_id="R01",
+                artifact_path=turn_path,
+                provider="fake-provider-a",
+                model="fake-model-a",
+            )
+            evidence_path.write_text(json.dumps(record), encoding="utf-8")
+
+        def write_attempt(status: str) -> None:
+            write_body(f"# R01\n\nFinal analysis.\n\nStatus: {status}\n")
+
+        for malformed in (
+            "# R01\n\nFinal analysis.\n\nStatus:\nREADY_FOR_OWNER\n",
+            "# R01\n\nFinal analysis.\n\nStatus:\n\nREADY_FOR_OWNER\n",
+        ):
+            write_body(malformed)
+            with self.assertRaises(engine.ProtocolError) as ctx:
+                dialogue.complete("worker-a", turn_path, evidence_path)
+            self.assertIn("exactly one line", str(ctx.exception))
+            self.assertEqual(dialogue.state()["status"], "CLAIMED")
+
+        write_attempt("APPROVE")
+        with self.assertRaises(engine.ProtocolError) as ctx:
+            dialogue.complete("worker-a", turn_path, evidence_path)
+        self.assertIn("not allowed", str(ctx.exception))
+        self.assertEqual(dialogue.state()["status"], "CLAIMED")
+
+        write_attempt("READY_FOR_OWNER")
+        state = dialogue.complete("worker-a", turn_path, evidence_path)
+        self.assertEqual(state["status"], "READY_FOR_OWNER")
+        self.assertIsNone(state["owner_decision"])
+
     def _finish_all_turns(self) -> None:
         path = self.dialogue_dir / "state.json"
         state = json.loads(path.read_text(encoding="utf-8"))

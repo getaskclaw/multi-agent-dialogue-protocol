@@ -15,6 +15,7 @@ MADP is useful when you need:
 - a fixed turn order and hard final stop;
 - one explicit agent launch at a time;
 - provider/model/session evidence instead of Markdown identity labels;
+- frozen-definition-preauthorized substitute actors for a round when a primary runtime is unavailable, without identity impersonation;
 - one Git commit for initialization, every accepted turn, and the owner decision;
 - fail-closed behavior when evidence, process cleanup, state, or Git provenance is wrong.
 
@@ -67,7 +68,7 @@ madp validate DIR --require-git --require-runner-completion
 madp owner-decide DIR --decision DECISION.md
 ```
 
-`madp run` is dry-run by default unless `--launch` is present. One launch processes at most one scheduled turn. Automatic loops are deliberately outside the engine.
+`madp run` is dry-run by default unless `--launch` is present. One launch processes at most one scheduled turn. A turn may freeze an ordered `substitute_actor_ids` list and a bounded `substitution_reasons` allowlist beside its primary `actor_id`; `status` shows the legal routes, and the operator explicitly selects a substitute with `--actor ... --substitution-reason ...`. The completed turn records the primary actor, actual runtime actor, and reason. Automatic loops and automatic cooldown classification are deliberately outside the engine.
 
 ## Supported adapters
 

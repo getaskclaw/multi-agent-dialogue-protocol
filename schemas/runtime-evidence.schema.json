@@ -29,6 +29,21 @@
       "type": "string",
       "minLength": 1
     },
+    "scheduled_actor_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Primary actor frozen in the turn schedule. Required by engine validation for a substitute turn."
+    },
+    "actor_selection": {
+      "type": "string",
+      "enum": ["primary", "substitute"],
+      "description": "Whether actor_id is the primary scheduled actor or a substitute preauthorized by the frozen definition."
+    },
+    "substitution_reason": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "description": "Null for a primary turn; otherwise the frozen reason code selected at claim time. Required by engine validation for a substitute turn."
+    },
     "round_id": {
       "type": "string",
       "minLength": 1
@@ -173,6 +188,9 @@
     {
       "evidence_version": 1,
       "actor_id": "worker-a",
+      "scheduled_actor_id": "worker-a",
+      "actor_selection": "primary",
+      "substitution_reason": null,
       "round_id": "R01",
       "adapter": "command",
       "transport": "command",

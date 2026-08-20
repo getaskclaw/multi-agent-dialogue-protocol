@@ -52,6 +52,7 @@ class PrepareContext:
     # required_capabilities; runner attaches it via dataclasses.replace
     # so the evidence records exactly what gated — never a re-probe.
     capability_manifest: dict | None = None
+    substitution_reason: str | None = None
 
     def placeholders(self) -> dict[str, str]:
         return {
@@ -356,6 +357,13 @@ class Adapter(ABC):
         record = {
             "evidence_version": EVIDENCE_VERSION,
             "actor_id": context.actor.actor_id,
+            "scheduled_actor_id": context.turn.actor_id,
+            "actor_selection": (
+                "primary"
+                if context.actor.actor_id == context.turn.actor_id
+                else "substitute"
+            ),
+            "substitution_reason": context.substitution_reason,
             "round_id": context.turn.round_id,
             "adapter": self.name,
             "transport": self.transport,

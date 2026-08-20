@@ -81,6 +81,7 @@ def validate_evidence(
     turn: TurnSpec,
     artifact_sha256: str,
     accepted_versions: tuple[int, ...] | None = None,
+    substitution_reason: str | None = None,
 ) -> list[str]:
     """Return every reason this evidence fails; empty list means valid.
 
@@ -122,6 +123,32 @@ def validate_evidence(
             f"evidence actor_id {record['actor_id']!r} does not match "
             f"claimed actor {actor.actor_id!r}"
         )
+    expected_selection = "primary" if actor.actor_id == turn.actor_id else "substitute"
+    if turn.substitute_actor_ids or expected_selection == "substitute":
+        for field in (
+            "scheduled_actor_id",
+            "actor_selection",
+            "substitution_reason",
+        ):
+            if field not in record:
+                errors.append(f"missing explicit actor evidence field: {field}")
+    if "scheduled_actor_id" in record and record["scheduled_actor_id"] != turn.actor_id:
+        errors.append(
+            f"evidence scheduled_actor_id {record['scheduled_actor_id']!r} does not "
+            f"match primary actor {turn.actor_id!r}"
+        )
+    if "actor_selection" in record and record["actor_selection"] != expected_selection:
+        errors.append(
+            f"evidence actor_selection {record['actor_selection']!r} does not match "
+            f"actual selection {expected_selection!r}"
+        )
+    if "substitution_reason" in record:
+        expected_reason = substitution_reason if expected_selection == "substitute" else None
+        if record["substitution_reason"] != expected_reason:
+            errors.append(
+                f"evidence substitution_reason {record['substitution_reason']!r} does "
+                f"not match claim reason {expected_reason!r}"
+            )
     if record["round_id"] != turn.round_id:
         errors.append(
             f"evidence round_id {record['round_id']!r} does not match "
