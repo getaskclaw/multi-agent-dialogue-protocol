@@ -75,7 +75,7 @@ madp owner-decide DIR --decision DECISION.md
 - **Hermes Agent** — provider, model, session, API usage, and final active message derived from the actor profile's `state.db`.
 - **Generic command** — requires a separate identity-verifier command; worker self-report is rejected.
 
-Every accepted turn also records the engine-probed adapter CLI version (`--version` output, verbatim plus SHA-256) as `cli_version` in the turn's evidence record, since real adapters depend on the exact installed CLI versions.
+Every accepted turn also records the engine-probed adapter CLI version (`--version` output, stored verbatim up to 500 chars with SHA-256 over the full untruncated output) as `cli_version` in the turn's evidence record, since real adapters depend on the exact installed CLI versions. The probe runs under the actor's own settings env and is informational only: a failed probe is recorded, never fatal to the turn.
 
 Real adapters depend on the exact installed CLI versions. Run the fake demo first, then perform a harmless live smoke and bounded canary on your own machine before relying on a real transport.
 

@@ -207,26 +207,44 @@ class Adapter(ABC):
         Informational only: a failed probe is recorded, never fatal —
         the turn's acceptance still rests on the identity evidence.
         """
-        argv = self.version_probe_argv(context)
-        if argv is None:
-            return None
         where = f"actor {context.actor.actor_id!r} ({self.name})"
+        argv: list[str] | None = None
         try:
+            # Inside the try: a subclass hook raising AdapterError (bad
+            # settings, malformed env) must degrade to a recorded error,
+            # never fail the accepted turn.
+            argv = self.version_probe_argv(context)
+            if argv is None:
+                return None
+            # Probe under the actor's own settings env (same substitution
+            # as the turn packet) so PATH- or env-dependent CLIs resolve
+            # the binary the turn actually used.
+            probe_env = substitute_env(
+                context.actor.settings.get("env"), context.placeholders(), where
+            )
             result = run_command(
-                argv, env={}, cwd=context.work_dir,
+                argv, env=probe_env, cwd=context.work_dir,
                 timeout=VERSION_PROBE_TIMEOUT_SECONDS,
                 what=f"{where}: version probe",
             )
         except AdapterError as exc:
-            return {"argv": list(argv), "error": str(exc)}
-        output = (result.stdout or result.stderr or "").strip()[:500]
+            record: dict = {"error": str(exc)}
+            if argv is not None:
+                record["argv"] = list(argv)
+            return record
+        raw_output = (result.stdout or result.stderr or "").strip()
         record = {
             "argv": list(argv),
             "exit_status": result.returncode,
-            "output": output,
-            "output_sha256": artifacts.sha256_bytes(output.encode("utf-8")),
+            "output": raw_output[:500],
+            # The hash attests the FULL probe output, computed before the
+            # 500-char storage truncation; output_truncated flags when the
+            # stored output is a prefix of what the hash covers.
+            "output_sha256": artifacts.sha256_bytes(raw_output.encode("utf-8")),
             "probed_at": utc_now(),
         }
+        if len(raw_output) > 500:
+            record["output_truncated"] = True
         if result.returncode != 0:
             record["error"] = f"version probe exited {result.returncode}"
         return record

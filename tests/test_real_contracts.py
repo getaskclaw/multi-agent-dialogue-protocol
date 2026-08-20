@@ -44,6 +44,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import support
 
@@ -791,7 +792,10 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
         self.assert_refused("outside this")
 
 
-class CommandIdentityTests(unittest.TestCase):
+class CommandFixtureBase(unittest.TestCase):
+    """Shared command-adapter dialogue fixture (worker/verifier fakes,
+    definition builder, dialogue factory); no test methods itself."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -857,6 +861,10 @@ class CommandIdentityTests(unittest.TestCase):
     def make_dialogue(self, settings_a: dict) -> engine.Dialogue:
         definition = config.parse_definition(self.definition_raw(settings_a))
         return engine.init_dialogue(definition, self.base / "dialogue")
+
+
+class CommandIdentityTests(CommandFixtureBase):
+    """Identity acceptance/refusal for the command transport."""
 
     def test_command_without_external_verifier_fails_closed(self) -> None:
         # Self-reported output is not identity proof: with no external
@@ -998,6 +1006,58 @@ class CliVersionEvidenceTests(HermesTestCase):
         self.assertEqual(cli["exit_status"], 1)
         self.assertEqual(dialogue.state()["turn_index"], 1)
 
+    def test_long_output_hash_covers_full_untruncated_output(self) -> None:
+        # output_sha256 attests what the CLI actually printed; the stored
+        # output is a 500-char prefix flagged by output_truncated.
+        version_line = "fake-hermes " + ("9" * 600) + " (long)"
+        stub = self._version_stub("hermes-long-version", version_line)
+        dialogue = self._dialogue_with_command(stub, "dialogue-long")
+        runner.launch(dialogue, "hermes-north")
+        cli = self.evidence_for(dialogue, 0)["cli_version"]
+        self.assertEqual(cli["output"], version_line[:500])
+        self.assertTrue(cli["output_truncated"])
+        self.assertEqual(
+            cli["output_sha256"],
+            hashlib.sha256(version_line.encode("utf-8")).hexdigest(),
+        )
+
+    def test_probe_argv_hook_error_is_recorded_not_fatal(self) -> None:
+        # A subclass hook raising AdapterError (bad settings/env) must
+        # degrade to a recorded error, never fail the accepted turn.
+        dialogue = self.make_dialogue()
+        with mock.patch.object(
+            hermes_adapter.HermesAdapter,
+            "version_probe_argv",
+            side_effect=adapters.AdapterError("settings broke"),
+        ):
+            runner.launch(dialogue, "hermes-north")
+        cli = self.evidence_for(dialogue, 0)["cli_version"]
+        self.assertIn("settings broke", cli["error"])
+        self.assertNotIn("argv", cli)
+        self.assertEqual(dialogue.state()["turn_index"], 1)
+
+    def test_probe_runs_under_actor_settings_env(self) -> None:
+        # PATH- or env-dependent CLIs must probe the binary the turn used:
+        # the probe inherits the actor's substituted settings env.
+        stub = self.base / "hermes-env-version"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then\n'
+            '    echo "fake-hermes ${FAKE_VERSION_TAG:-unset} (env)"\n'
+            "    exit 0\n"
+            "fi\n"
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        raw = self.definition_raw({"FAKE_VERSION_TAG": "from-settings-env"})
+        raw["actors"][0]["settings"]["command_name"] = str(stub)
+        definition = config.parse_definition(raw)
+        dialogue = engine.init_dialogue(definition, self.base / "dialogue-env")
+        runner.launch(dialogue, "hermes-north")
+        cli = self.evidence_for(dialogue, 0)["cli_version"]
+        self.assertEqual(cli["output"], "fake-hermes from-settings-env (env)")
+
 
 class FableCliVersionTests(FableTestCase):
     def test_fable_turn_records_probed_cli_version(self) -> None:
@@ -1015,7 +1075,7 @@ class FableCliVersionTests(FableTestCase):
         self.assertEqual(cli["output"], "fake-fable-session 0.3.0b1 (fixture)")
 
 
-class CommandCliVersionTests(CommandIdentityTests):
+class CommandCliVersionTests(CommandFixtureBase):
     def _settings(self, argv0: str) -> dict:
         argv = [argv0, *self.worker_argv()[1:]]
         return {

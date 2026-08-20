@@ -103,16 +103,33 @@
     },
     "cli_version": {
       "type": "object",
-      "description": "Engine-probed adapter CLI version record: argv, exit_status, verbatim output (truncated), output_sha256, probed_at; an 'error' key appears instead of output fields when the probe itself failed. Informational provenance only — never part of turn acceptance.",
-      "required": [
-        "argv"
-      ],
+      "description": "Engine-probed adapter CLI version record. argv/exit_status/output/probed_at describe the probe; output is truncated at 500 chars while output_sha256 always attests the FULL untruncated output (output_truncated=true marks that case). An 'error' key appears when the probe itself failed; if even the probe argv could not be built, only 'error' is present. Informational provenance only — never part of turn acceptance.",
+      "additionalProperties": false,
       "properties": {
         "argv": {
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "exit_status": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "string"
+        },
+        "output_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "output_truncated": {
+          "type": "boolean"
+        },
+        "probed_at": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
         }
       }
     }
