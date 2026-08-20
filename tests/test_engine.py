@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import support
 
@@ -58,6 +59,30 @@ class InitTests(EngineTestCase):
         with self.assertRaises(engine.ProtocolError) as ctx:
             dialogue.state()
         self.assertIn("continuation artifact hash mismatch", str(ctx.exception))
+
+    def test_continuation_git_facts_verified_once_per_instance(self) -> None:
+        # The live artifact bytes are re-hashed on every state read; the
+        # content-addressed Git facts are verified once per Dialogue
+        # instance, so validate/report paths do not spawn git per read.
+        self.definition, artifact = self.continuation_definition()
+        dialogue = self.init_dialogue()
+        with mock.patch.object(
+            engine.gitops,
+            "first_commit_adding",
+            wraps=engine.gitops.first_commit_adding,
+        ) as spy:
+            dialogue.state()
+            dialogue.state()
+            self.assertEqual(spy.call_count, 0, "init already verified them")
+        fresh = engine.Dialogue(self.dialogue_dir)
+        with mock.patch.object(
+            engine.gitops,
+            "first_commit_adding",
+            wraps=engine.gitops.first_commit_adding,
+        ) as spy:
+            fresh.state()
+            fresh.state()
+            self.assertEqual(spy.call_count, 1, "cached after the first read")
 
     def test_init_creates_state_and_definition(self) -> None:
         dialogue = self.init_dialogue()
@@ -150,6 +175,15 @@ class ClaimTests(EngineTestCase):
         self.assertTrue(state["claim"]["nonce"])
         self.assertEqual(state["revision"], 1)
         self.assertTrue((self.dialogue_dir / engine.LOCK_FILE).exists())
+
+    def test_whitespace_only_substitution_reason_is_rejected(self) -> None:
+        # "  " must not collapse to None and silently pass as a primary
+        # claim; a non-empty value is required when the flag is given.
+        dialogue = self.init_dialogue()
+        with self.assertRaises(engine.ProtocolError) as ctx:
+            dialogue.claim("worker-a", substitution_reason="   ")
+        self.assertIn("non-empty", str(ctx.exception))
+        self.assertEqual(dialogue.state()["status"], "OPEN")
 
     def test_wrong_actor_cannot_claim(self) -> None:
         dialogue = self.init_dialogue()
@@ -320,6 +354,30 @@ class FinalStopTests(EngineTestCase):
         state = dialogue.complete("worker-a", turn_path, evidence_path)
         self.assertEqual(state["status"], "READY_FOR_OWNER")
         self.assertIsNone(state["owner_decision"])
+
+    def test_crlf_status_line_is_accepted(self) -> None:
+        raw = support.two_actor_definition()
+        raw["schedule"] = raw["schedule"][:1]
+        raw["final_round_id"] = "R01"
+        raw["agent_final_statuses"] = ["READY_FOR_OWNER"]
+        self.definition = config.parse_definition(raw)
+        dialogue = self.init_dialogue()
+        dialogue.claim("worker-a")
+        turn_path = self.root / "R01-crlf.md"
+        turn_path.write_bytes(
+            b"# R01\r\n\r\nFinal analysis.\r\n\r\nStatus: READY_FOR_OWNER\r\n"
+        )
+        record = support.make_evidence(
+            actor_id="worker-a",
+            round_id="R01",
+            artifact_path=turn_path,
+            provider="fake-provider-a",
+            model="fake-model-a",
+        )
+        evidence_path = self.root / "R01-crlf.json"
+        evidence_path.write_text(json.dumps(record), encoding="utf-8")
+        state = dialogue.complete("worker-a", turn_path, evidence_path)
+        self.assertEqual(state["status"], "READY_FOR_OWNER")
 
     def _finish_all_turns(self) -> None:
         path = self.dialogue_dir / "state.json"

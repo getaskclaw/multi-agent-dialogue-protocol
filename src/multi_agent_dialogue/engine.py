@@ -85,8 +85,15 @@ def resolve_actor_selection(
             f"primary actor is {turn.actor_id!r}, allowed actors are "
             f"{list(turn.allowed_actor_ids)!r}"
         )
-    reason = substitution_reason.strip() if isinstance(substitution_reason, str) else None
-    reason = reason or None
+    if substitution_reason is not None:
+        if not isinstance(substitution_reason, str) or not substitution_reason.strip():
+            raise ProtocolError(
+                "substitution_reason must be a non-empty reason code when "
+                f"given, got {substitution_reason!r}"
+            )
+        reason: str | None = substitution_reason.strip()
+    else:
+        reason = None
     if actor_id == turn.actor_id:
         if reason is not None:
             raise ProtocolError(
@@ -310,6 +317,11 @@ def verify_continuation_anchor(definition: config.ProtocolDefinition) -> None:
     anchor = definition.continuation
     if anchor is None:
         return
+    _verify_continuation_artifact_bytes(anchor)
+    _verify_continuation_git_facts(anchor)
+
+
+def _verify_continuation_artifact_bytes(anchor) -> None:
     path = Path(anchor.artifact_path)
     try:
         current = artifacts.read_bytes_nofollow(path, "continuation artifact")
@@ -320,6 +332,10 @@ def verify_continuation_anchor(definition: config.ProtocolDefinition) -> None:
             f"continuation artifact hash mismatch for {anchor.protocol_id}/"
             f"{anchor.round_id}"
         )
+
+
+def _verify_continuation_git_facts(anchor) -> None:
+    path = Path(anchor.artifact_path)
     source_root = gitops.worktree_root(path.parent)
     if source_root is None:
         raise ProtocolError("continuation artifact is not inside a Git worktree")
@@ -393,6 +409,10 @@ def init_dialogue(definition: config.ProtocolDefinition, directory: Path | str) 
     }
     atomic_write_json(directory / STATE_FILE, state)
     dialogue = Dialogue(directory)
+    if definition.continuation is not None:
+        # init just verified the anchor's Git facts above; do not spawn
+        # the same subprocesses again on the first state() read.
+        dialogue._continuation_git_verified = True
     try:
         gitops.commit_paths(
             root,
@@ -420,6 +440,10 @@ class Dialogue:
         _reject_symlink(self.directory, "dialogue directory")
         if not self.directory.is_dir():
             raise ProtocolError(f"not a dialogue directory: {self.directory}")
+        # Content-addressed Git facts of a continuation anchor are
+        # verified once per Dialogue instance (see state()); the artifact
+        # bytes themselves are re-hashed on every read.
+        self._continuation_git_verified = False
 
     # -- loading ---------------------------------------------------------
 
@@ -453,7 +477,18 @@ class Dialogue:
             raise ProtocolError(
                 "definition digest mismatch: definition.json was modified after init"
             )
-        verify_continuation_anchor(definition)
+        anchor = definition.continuation
+        if anchor is not None:
+            # The live artifact bytes are re-read and re-hashed on every
+            # state read (no subprocess, tamper-evident). The Git-side
+            # facts are content-addressed and verified once per Dialogue
+            # instance; spawning several git subprocesses per read is
+            # pure cost on validate/report paths that call state()
+            # repeatedly.
+            _verify_continuation_artifact_bytes(anchor)
+            if not self._continuation_git_verified:
+                _verify_continuation_git_facts(anchor)
+                self._continuation_git_verified = True
         return state
 
     def _write_state(self, state: dict) -> dict:
@@ -739,7 +774,7 @@ class Dialogue:
                 )
         if turn.round_id == definition.final_round_id and definition.agent_final_statuses:
             assert turn_text is not None
-            statuses = re.findall(r"(?m)^Status:[ \t]*(\S+)[ \t]*$", turn_text)
+            statuses = re.findall(r"(?m)^Status:[ \t]*(\S+)[ \t]*\r?$", turn_text)
             if len(statuses) != 1:
                 raise ProtocolError(
                     "final turn must contain exactly one line 'Status: <VALUE>'"

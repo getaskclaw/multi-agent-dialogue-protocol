@@ -293,6 +293,13 @@ def _parse_turn(raw: Any, position: int, errors: list[str]) -> TurnSpec | None:
                 f"{where}: {reason!r} is not a safe reason code; use 1-64 "
                 "lowercase letters, digits, underscores, or hyphens"
             )
+        elif reason == "none":
+            # "none" is the null sentinel written to Madp-Substitution-
+            # Reason trailers; allowing it as a real code would collide.
+            errors.append(
+                f"{where}: 'none' is reserved as the null substitution "
+                "sentinel and cannot be a reason code"
+            )
     if substitutes_raw and not reasons_raw:
         errors.append(
             f"{where}: substitution_reasons is required when substitute actors exist"

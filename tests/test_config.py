@@ -152,6 +152,27 @@ class InvalidDefinitionTests(unittest.TestCase):
         raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
         self.assert_rejected(raw, "role must match primary actor")
 
+    def test_none_reason_code_is_reserved(self) -> None:
+        # "none" is the null sentinel written to Madp-Substitution-Reason
+        # trailers; as a real code it would collide with it.
+        raw = support.two_actor_definition()
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "prov-c",
+                "expected_model": "model-c",
+                "settings": {
+                    "argv": ["fake-worker"],
+                    "identity_verifier_argv": ["fake-verifier"],
+                },
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["none"]
+        self.assert_rejected(raw, "reserved")
+
     def test_rejects_substitute_using_same_hermes_home(self) -> None:
         raw = support.two_actor_definition()
         raw["actors"][1]["role"] = raw["actors"][0]["role"]
