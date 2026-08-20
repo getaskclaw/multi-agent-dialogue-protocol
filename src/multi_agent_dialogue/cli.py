@@ -228,8 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--command-name", default=None,
                    help="hermes-cli only: probe a REAL installed CLI instead of "
                         "the fake; requires --expected-provider/--expected-model")
-    p.add_argument("--expected-provider", default=None)
-    p.add_argument("--expected-model", default=None)
+    p.add_argument("--expected-provider", default=None,
+                   help="identity the real CLI must prove; required with "
+                        "--command-name (hermes-cli), meaningless without it")
+    p.add_argument("--expected-model", default=None,
+                   help="identity the real CLI must prove; required with "
+                        "--command-name (hermes-cli), meaningless without it")
     p.add_argument("--no-push", action="store_true",
                    help="accepted for explicitness: canaries are always "
                         "local-only (the engine has no push capability)")

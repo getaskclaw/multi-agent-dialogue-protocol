@@ -61,7 +61,10 @@ def _fake_bin() -> Path:
     raise CanaryError(
         "cannot find the shipped fake executables (looked for "
         + ", ".join(str(c) for c in candidates)
-        + "); set MADP_FAKE_BIN to examples/fakes/bin"
+        + "); the fakes ship with the source repository under "
+        "examples/fakes/bin — they are NOT part of the installed "
+        "package, so an installed madp needs MADP_FAKE_BIN pointed at a "
+        "source checkout's examples/fakes/bin"
     )
 
 
@@ -193,17 +196,36 @@ def run_canary(
             "--command-name names a real CLI; pass --expected-provider and "
             "--expected-model explicitly — a canary never guesses identity"
         )
-    if dialogue_dir.exists() and any(dialogue_dir.iterdir()):
+    if command_name is None and (
+        expected_provider is not None or expected_model is not None
+    ):
         raise CanaryError(
-            f"canary dialogue path {dialogue_dir} is not empty; "
-            "a canary always starts from a fresh directory"
+            "--expected-provider/--expected-model are only meaningful "
+            "with --command-name; without it the shipped fake's identity "
+            "is used and these flags would be silently ignored"
+        )
+    if dialogue_dir.exists():
+        if not dialogue_dir.is_dir():
+            raise CanaryError(
+                f"canary dialogue path {dialogue_dir} exists and is not "
+                "a directory"
+            )
+        if any(dialogue_dir.iterdir()):
+            raise CanaryError(
+                f"canary dialogue path {dialogue_dir} is not empty; "
+                "a canary always starts from a fresh directory"
+            )
+    scratch = dialogue_dir.parent / (dialogue_dir.name + ".canary-scratch")
+    if scratch.exists():
+        raise CanaryError(
+            f"canary scratch {scratch} already exists from a prior run; "
+            "remove it first — a canary never reuses stale runtime state"
         )
     dialogue_dir.mkdir(parents=True, exist_ok=True)
     identity_fallback = _ensure_git_repo(dialogue_dir)
     # Scratch lives OUTSIDE the dialogue's Git repository: untracked
     # runtime state inside the repo would trip the production gate's
     # clean-tree check.
-    scratch = dialogue_dir.parent / (dialogue_dir.name + ".canary-scratch")
     scratch.mkdir()
 
     expected = (

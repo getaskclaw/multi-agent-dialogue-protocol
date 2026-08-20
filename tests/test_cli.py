@@ -268,6 +268,9 @@ class CanaryTests(unittest.TestCase):
             "--dialogue", str(self.base / dirname), *extra,
         )
 
+    def run_cli_dir(self, path: Path) -> subprocess.CompletedProcess:
+        return run_cli("canary", "--adapter", "command", "--dialogue", str(path))
+
     def test_canary_command_adapter_passes(self) -> None:
         result = self.run_canary("command", "--no-push")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -328,8 +331,25 @@ class CanaryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not empty", result.stderr)
 
-    def run_cli_dir(self, path: Path) -> subprocess.CompletedProcess:
-        return run_cli("canary", "--adapter", "command", "--dialogue", str(path))
+    def test_dialogue_path_that_is_a_file_is_rejected(self) -> None:
+        target = self.base / "a-file"
+        target.write_text("x", encoding="utf-8")
+        result = self.run_cli_dir(target)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_stale_scratch_dir_is_rejected(self) -> None:
+        (self.base / "canary.canary-scratch").mkdir()
+        result = self.run_canary("command")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exists", result.stderr)
+
+    def test_expected_identity_flags_require_command_name(self) -> None:
+        result = self.run_canary(
+            "hermes-cli", "--expected-model", "some-model"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("only meaningful", result.stderr)
 
     def test_real_binary_override_requires_explicit_identity(self) -> None:
         result = self.run_canary(
