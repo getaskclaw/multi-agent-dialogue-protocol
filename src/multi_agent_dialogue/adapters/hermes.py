@@ -298,9 +298,26 @@ class HermesAdapter(Adapter):
             )
             api_calls = 0
             try:
+                # Only main-conversation calls (task ''/NULL) prove the
+                # actor's model identity. Auxiliary Hermes calls (title
+                # generation, vision, compression, ...) are recorded in the
+                # same table with a non-empty task and a different model;
+                # they say nothing about which model reasoned the turn.
+                # Older Hermes state.db schemas have no task column; there
+                # every usage row is a main-conversation call.
+                cols = {
+                    row[1]
+                    for row in con.execute(
+                        "PRAGMA table_info(session_model_usage)"
+                    ).fetchall()
+                }
+                task_filter = (
+                    " AND (task IS NULL OR task = '')" if "task" in cols else ""
+                )
                 usage_rows = con.execute(
                     "SELECT model, billing_provider, api_call_count "
-                    "FROM session_model_usage WHERE session_id = ?",
+                    "FROM session_model_usage WHERE session_id = ?"
+                    + task_filter,
                     (session_id,),
                 ).fetchall()
             except sqlite3.Error as exc:
