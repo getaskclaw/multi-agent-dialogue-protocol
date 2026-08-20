@@ -268,6 +268,19 @@ all-rows behavior (every row is a main-conversation call there). The
 column check matches SQLite semantics case-insensitively, so a schema
 declaring `"Task"` still triggers the filter.
 
+**Message boundary**: every row in the matched session must carry a
+timestamp inside the invocation window — a row outside it means the
+session saw activity this launch cannot account for (late finalization
+writes, a reused/continued session, a concurrent writer) and the turn
+fails closed. The turn is the final ACTIVE text-bearing assistant
+message; interim active drafts before it (tool narration, superseded
+text) and inactive tail rows (compaction ghosts) are normal one-shot
+noise, but an active `user` row after the final assistant message
+means the session continued beyond this turn and completion is
+refused. The accepted span (`first_message_id`, `final_message_id`,
+`message_count`) is recorded in the proof as `message_boundary` so
+review can see exactly which rows bounded the turn.
+
 **Turn briefings**: every actor receives one `## Goal` / `## Checks` /
 `## Boundaries` / `## Report` task file (the exact sections
 `fable-session` requires; one shape serves every transport). From the

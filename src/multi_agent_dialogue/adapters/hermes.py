@@ -15,7 +15,11 @@ command exits, this adapter opens the actor-specific
 provider, observed model set, and the final ACTIVE assistant message
 from the ``sessions``, ``messages``, and ``session_model_usage`` tables
 — exactly one session with this turn's unique ``--source`` started
-inside the invocation window.
+inside the invocation window. The message boundary is proven too:
+every session row must sit inside the invocation window, the turn is
+the final ACTIVE text-bearing assistant message, and an active user
+row after it (a continued session) fails closed; the accepted
+first/final message ids are recorded in the proof.
 
 Compatible Hermes session records may leave ``sessions.ended_at`` and
 ``sessions.end_reason`` NULL after a successful one-shot. Completion is
@@ -212,6 +216,7 @@ class HermesAdapter(Adapter):
             "observed_models": observed["models"],
             "observed_providers": observed["providers"],
             "api_call_count": observed["api_call_count"],
+            "message_boundary": observed["message_boundary"],
             "invocation_window": [started_before, ended_after],
             # The proof names what actually established completion instead
             # of claiming a DB terminal state when none was persisted.
@@ -360,19 +365,74 @@ class HermesAdapter(Adapter):
                 )
 
             try:
-                final_row = con.execute(
-                    "SELECT content FROM messages WHERE session_id = ? "
-                    "AND role = 'assistant' AND active = 1 "
-                    "AND content IS NOT NULL AND content != '' "
-                    "ORDER BY id DESC LIMIT 1",
+                message_rows = con.execute(
+                    "SELECT id, role, content, timestamp, active "
+                    "FROM messages WHERE session_id = ? ORDER BY id",
                     (session_id,),
-                ).fetchone()
+                ).fetchall()
             except sqlite3.Error as exc:
                 raise AdapterError(f"{where}: cannot query messages: {exc}") from exc
-            if final_row is None or not str(final_row[0]).strip():
+
+            # Message boundary: every row this session contains must
+            # belong to THIS invocation. A row outside the window means
+            # the session saw activity the launch cannot account for
+            # (late finalization writes, a reused/continued session, a
+            # concurrent writer) and the boundary between "the turn" and
+            # "later activity" is unproven.
+            for msg_id, msg_role, _content, msg_ts, _active in message_rows:
+                try:
+                    ts = float(msg_ts)
+                except (TypeError, ValueError):
+                    raise AdapterError(
+                        f"{where}: session {session_id} message id "
+                        f"{msg_id} ({msg_role}) has no usable timestamp; "
+                        "the message boundary is unproven"
+                    )
+                if not (
+                    started_before - WINDOW_SLACK_SECONDS
+                    <= ts
+                    <= ended_after + WINDOW_SLACK_SECONDS
+                ):
+                    raise AdapterError(
+                        f"{where}: session {session_id} message id "
+                        f"{msg_id} ({msg_role}) sits outside this "
+                        "invocation window; the session saw activity this "
+                        "launch cannot account for and the message "
+                        "boundary is unproven"
+                    )
+
+            # The turn is the final ACTIVE text-bearing assistant message.
+            # Interim active drafts before it (tool narration, superseded
+            # text) are normal one-shot noise; an inactive tail row
+            # (compaction ghost) is normal too. What is NOT acceptable:
+            # an active user row after it — the session continued with a
+            # new prompt, so "the turn" no longer bounds the exchange.
+            final_id = None
+            final_text: str | None = None
+            for msg_id, msg_role, content, _ts, active in message_rows:
+                if (
+                    msg_role == "assistant"
+                    and active == 1
+                    and content is not None
+                    and str(content).strip()
+                ):
+                    final_id, final_text = msg_id, str(content)
+            if final_id is None or final_text is None:
                 raise AdapterError(
                     f"{where}: session {session_id} has no final active "
                     "assistant message; there is no turn to publish"
+                )
+            later_user = [
+                msg_id
+                for msg_id, msg_role, _c, _t, active in message_rows
+                if msg_role == "user" and active == 1 and msg_id > final_id
+            ]
+            if later_user:
+                raise AdapterError(
+                    f"{where}: session {session_id} shows active user "
+                    f"message id(s) {later_user} after the final assistant "
+                    f"message id {final_id}; the session continued beyond "
+                    "this turn and the message boundary is unproven"
                 )
             return {
                 "session_id": session_id,
@@ -382,7 +442,16 @@ class HermesAdapter(Adapter):
                 "models": sorted(models),
                 "providers": sorted(providers),
                 "api_call_count": api_calls,
-                "final_message": str(final_row[0]),
+                "final_message": final_text,
+                # Message-boundary span recorded in the proof so review
+                # can see exactly which rows bounded the turn.
+                "message_boundary": {
+                    "first_message_id": (
+                        message_rows[0][0] if message_rows else None
+                    ),
+                    "final_message_id": final_id,
+                    "message_count": len(message_rows),
+                },
             }
         finally:
             con.close()
