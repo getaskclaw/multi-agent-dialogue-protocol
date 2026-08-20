@@ -93,6 +93,26 @@ class EvidenceValidationTests(unittest.TestCase):
         errors = self.check(self.valid_evidence(proof={}))
         self.assertTrue(any("proof" in e for e in errors))
 
+    def test_evidence_version_outside_accepted_set_rejected(self) -> None:
+        errors = self.check(self.valid_evidence(evidence_version=2))
+        self.assertTrue(
+            any("not accepted by this dialogue definition" in e for e in errors)
+        )
+
+    def test_evidence_version_engine_cannot_read_rejected(self) -> None:
+        # Defense in depth: even a caller hand-passing a wider accepted
+        # set cannot make the engine read a record layout it does not
+        # understand.
+        record = self.valid_evidence(evidence_version=2)
+        errors = evidence.validate_evidence(
+            record,
+            actor=self.actor,
+            turn=self.turn,
+            artifact_sha256=evidence.sha256_file(self.artifact),
+            accepted_versions=(1, 2),
+        )
+        self.assertTrue(any("unsupported evidence_version" in e for e in errors))
+
     def test_markdown_labels_are_not_evidence(self) -> None:
         # A record consisting only of frontmatter-style claims must fail.
         record = {"actor": "worker-a", "model": "fake-model-a", "round": "R01"}
@@ -172,6 +192,14 @@ class CompletionTests(CompletionTestCase):
         state = self.complete_turn("worker-b", "R04")
         self.assertEqual(state["status"], "READY_FOR_OWNER")
         self.assertEqual(state["turn_index"], 4)
+
+    def test_evidence_version_outside_definition_set_fails_closed(self) -> None:
+        # Canary from the design review: evidence_version 2 against a
+        # definition pinned to 1 is rejected and the turn never commits.
+        with self.assertRaises(engine.ProtocolError) as ctx:
+            self.complete_turn("worker-a", "R01", evidence_version=2)
+        self.assertIn("evidence_version", str(ctx.exception))
+        self.assertEqual(self.dialogue.state()["turn_index"], 0)
 
     def test_complete_requires_claim(self) -> None:
         turn_path = self.write_turn("R01")

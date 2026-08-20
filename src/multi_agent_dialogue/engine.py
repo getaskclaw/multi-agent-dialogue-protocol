@@ -445,7 +445,8 @@ class Dialogue:
 
         actor = definition.actor(actor_id)
         evidence_errors = evidence.validate_evidence(
-            record, actor=actor, turn=turn, artifact_sha256=artifact_sha
+            record, actor=actor, turn=turn, artifact_sha256=artifact_sha,
+            accepted_versions=definition.evidence_versions,
         )
         if evidence_errors:
             raise ProtocolError(
@@ -720,6 +721,7 @@ class Dialogue:
                             actor=actor,
                             turn=spec,
                             artifact_sha256=artifact_sha,
+                            accepted_versions=definition.evidence_versions,
                         )
                     )
                 except (evidence.EvidenceError, config.ConfigError) as exc:
