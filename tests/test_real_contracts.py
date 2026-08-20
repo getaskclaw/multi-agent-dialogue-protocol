@@ -1437,5 +1437,97 @@ class BuildReportTests(CommandFixtureBase):
         self.assertEqual(status, "", "report leaves the worktree untouched")
 
 
+class CapabilityGateTests(HermesTestCase):
+    """Issue #5 proposal 3: the engine probes required capabilities from
+    the CLI itself and refuses the launch before any runtime spawn."""
+
+    def _dialogue_with_capabilities(self, command_name: str,
+                                    capabilities: list[str],
+                                    directory: str) -> engine.Dialogue:
+        raw = self.definition_raw()
+        raw["actors"][0]["settings"]["command_name"] = command_name
+        raw["actors"][0]["required_capabilities"] = capabilities
+        definition = config.parse_definition(raw)
+        return engine.init_dialogue(definition, self.base / directory)
+
+    def test_capable_cli_passes_gate_and_records_manifest(self) -> None:
+        dialogue = self._dialogue_with_capabilities(
+            HERMES, ["cli-version", "one-shot-source-tagging"], "dialogue-ok"
+        )
+        runner.launch(dialogue, "hermes-north")
+        manifest = self.evidence_for(dialogue, 0)["capability_manifest"]
+        capabilities = manifest["capabilities"]
+        self.assertTrue(capabilities["cli-version"]["ok"])
+        self.assertTrue(capabilities["one-shot-source-tagging"]["ok"])
+        probe = capabilities["one-shot-source-tagging"]["probe"]
+        self.assertEqual(probe["argv"], [HERMES, "chat", "--help"])
+        self.assertEqual(len(probe["output_sha256"]), 64)
+
+    def test_missing_capability_refuses_launch_before_any_spawn(self) -> None:
+        # The proposal's canary: the probed CLI lacks a required field,
+        # so the launch is refused with NO claim and NO runtime spawn.
+        stub = self.base / "hermes-no-source"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "stub-hermes 1.0"; exit 0; fi\n'
+            'if [ "$1" = "chat" ] && [ "$2" = "--help" ]; then\n'
+            '    echo "usage: hermes chat [-h] [-q QUERY] [-Q]"\n'
+            "    exit 0\n"
+            "fi\n"
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        dialogue = self._dialogue_with_capabilities(
+            str(stub), ["one-shot-source-tagging"], "dialogue-refused"
+        )
+        with self.assertRaisesRegex(engine.ProtocolError, "capabilities"):
+            runner.launch(dialogue, "hermes-north")
+        self.assertFalse(self.marker.exists(), "no runtime process may spawn")
+        self.assertIsNone(dialogue.state()["claim"])
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
+    def test_lookalike_flags_do_not_satisfy_the_probe(self) -> None:
+        # --source-map must not satisfy --source; -q must not match
+        # --query/--quiet — the probe asserts exact flags.
+        stub = self.base / "hermes-lookalike-flags"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "stub-hermes 1.0"; exit 0; fi\n'
+            'if [ "$1" = "chat" ] && [ "$2" = "--help" ]; then\n'
+            '    echo "usage: hermes chat [-h] [-q QUERY] [--source-map FILE] '
+            '[--pass-session-id]"\n'
+            "    exit 0\n"
+            "fi\n"
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        dialogue = self._dialogue_with_capabilities(
+            str(stub), ["one-shot-source-tagging"], "dialogue-lookalike"
+        )
+        with self.assertRaisesRegex(engine.ProtocolError, "capabilities"):
+            runner.launch(dialogue, "hermes-north")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
+    def test_failing_version_probe_fails_the_gate(self) -> None:
+        stub = self.base / "hermes-broken-version"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then exit 1; fi\n'
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        dialogue = self._dialogue_with_capabilities(
+            str(stub), ["cli-version"], "dialogue-broken-version"
+        )
+        with self.assertRaisesRegex(engine.ProtocolError, "cli-version"):
+            runner.launch(dialogue, "hermes-north")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

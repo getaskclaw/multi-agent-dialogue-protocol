@@ -22,6 +22,19 @@ KNOWN_TRANSPORTS = ("command", "fable-session", "hermes-cli")
 # names it. The latest entry is the version adapters write per turn.
 SUPPORTED_EVIDENCE_VERSIONS = (1,)
 
+# Controlled capability vocabulary for actor `required_capabilities`.
+# Every entry names a capability the ENGINE probes from the CLI itself
+# (never adapter self-report); the pre-launch gate refuses a turn whose
+# probed manifest lacks a required capability. Add entries only with a
+# probe verified against the real CLI.
+KNOWN_CAPABILITIES = (
+    # `<cli> --version` exits 0.
+    "cli-version",
+    # hermes-cli: `<cli> chat --help` shows the one-shot contract
+    # surface (-q, --source, --pass-session-id).
+    "one-shot-source-tagging",
+)
+
 DEFAULT_OWNER_DECISIONS = ("APPROVE", "REJECT", "NEED_MORE_EVIDENCE")
 
 _ACTOR_KEYS = {
@@ -31,6 +44,7 @@ _ACTOR_KEYS = {
     "expected_provider",
     "expected_model",
     "settings",
+    "required_capabilities",
 }
 _TURN_KEYS = {"round_id", "actor_id", "purpose", "artifact_kind", "word_limit"}
 
@@ -47,6 +61,9 @@ class Actor:
     expected_provider: str
     expected_model: str
     settings: dict[str, Any] = field(default_factory=dict)
+    # Capabilities (controlled vocabulary, KNOWN_CAPABILITIES) the
+    # engine must probe from the CLI before any runtime spawn.
+    required_capabilities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,6 +145,23 @@ def _parse_actor(raw: Any, position: int, errors: list[str]) -> Actor | None:
     if not isinstance(settings, dict):
         errors.append(f"{where}: settings must be an object")
         settings = {}
+    capabilities_raw = raw.get("required_capabilities", [])
+    capabilities: tuple[str, ...] = ()
+    if (
+        not isinstance(capabilities_raw, list)
+        or not all(isinstance(item, str) for item in capabilities_raw)
+    ):
+        errors.append(f"{where}: required_capabilities must be a list of strings")
+    else:
+        unknown = [item for item in capabilities_raw if item not in KNOWN_CAPABILITIES]
+        if unknown:
+            errors.append(
+                f"{where}: unknown required_capabilities {unknown}; the "
+                f"controlled vocabulary is {list(KNOWN_CAPABILITIES)}"
+            )
+        if len(set(capabilities_raw)) != len(capabilities_raw):
+            errors.append(f"{where}: required_capabilities contains duplicates")
+        capabilities = tuple(capabilities_raw)
     if actor_id and _looks_secret(canonical_json(settings)):
         errors.append(f"{where}: settings must not embed credential material")
     if errors:
@@ -140,6 +174,7 @@ def _parse_actor(raw: Any, position: int, errors: list[str]) -> Actor | None:
         expected_provider=provider,
         expected_model=model,
         settings=settings,
+        required_capabilities=capabilities,
     )
 
 

@@ -40,9 +40,11 @@ from the actor's role or ID.
 
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import artifacts
@@ -111,6 +113,32 @@ class HermesAdapter(Adapter):
         where = f"actor {context.actor.actor_id!r} (hermes)"
         command_name = require_str_setting(settings, "command_name", where)
         return [command_name, "--version"]
+
+    def capability_probes(
+        self, context: PrepareContext
+    ) -> dict[str, tuple[list[str], Callable[[str, int], bool]]]:
+        settings = context.actor.settings
+        where = f"actor {context.actor.actor_id!r} (hermes)"
+        command_name = require_str_setting(settings, "command_name", where)
+
+        def flag(name: str) -> re.Pattern:
+            # Exact-flag match: -q must not match --query, --source must
+            # not match --source-map.
+            return re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])")
+
+        return {
+            # The one-shot contract surface, probed from the real CLI's
+            # own chat --help (verified against Hermes v0.20).
+            "one-shot-source-tagging": (
+                [command_name, "chat", "--help"],
+                lambda output, rc: (
+                    rc == 0
+                    and flag("-q").search(output) is not None
+                    and flag("--source").search(output) is not None
+                    and flag("--pass-session-id").search(output) is not None
+                ),
+            )
+        }
 
     def _argv(self, command_name: str, prompt: str, source: str) -> tuple[str, ...]:
         return (

@@ -289,6 +289,18 @@ all-rows behavior (every row is a main-conversation call there). The
 column check matches SQLite semantics case-insensitively, so a schema
 declaring `"Task"` still triggers the filter.
 
+**Capability gate**: an actor may declare `required_capabilities` from
+the controlled vocabulary (`cli-version`; hermes-cli:
+`one-shot-source-tagging`). Before any claim or runtime spawn, the
+engine probes each required capability from the CLI itself — `--version`
+must exit 0; `chat --help` must show the `-q`/`--source`/
+`--pass-session-id` one-shot surface (verified against Hermes v0.20) —
+and refuses the launch when the probed manifest lacks one. The adapter
+only names what to probe; it never reports its own support. The
+manifest (probe argv, exit, truncated output, full-output SHA-256 per
+capability) is recorded in the turn's evidence as
+`capability_manifest`.
+
 **Message boundary**: every row in the matched session must carry a
 timestamp inside the invocation window — a row outside it means the
 session saw activity this launch cannot account for (late finalization

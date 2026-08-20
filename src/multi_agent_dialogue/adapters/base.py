@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,10 @@ class PrepareContext:
     task_file: Path
     turn_file: Path
     evidence_file: Path
+    # The manifest that gated this launch, when the actor declares
+    # required_capabilities; runner attaches it via dataclasses.replace
+    # so the evidence records exactly what gated — never a re-probe.
+    capability_manifest: dict | None = None
 
     def placeholders(self) -> dict[str, str]:
         return {
@@ -200,6 +205,103 @@ class Adapter(ABC):
         """
         return None
 
+    def capability_probes(
+        self, context: PrepareContext
+    ) -> dict[str, tuple[list[str], Callable[[str, int], bool]]]:
+        """Extra CLI capability probes: name -> (argv, check).
+
+        ``check`` receives (full_output, returncode) and returns bool.
+        Every probe is run by the engine against the real CLI — the
+        adapter only names WHAT to probe, never reports its own support.
+        """
+        return {}
+
+    def _run_capability_probe(
+        self,
+        argv: list[str],
+        check,
+        context: PrepareContext,
+        where: str,
+    ) -> dict:
+        """Run one bounded capability probe under the actor's env.
+
+        cwd is the dialogue directory (always exists) so the pre-launch
+        gate can probe before the turn's work directory is created.
+        """
+        try:
+            probe_env = substitute_env(
+                context.actor.settings.get("env"), context.placeholders(), where
+            )
+            result = run_command(
+                argv, env=probe_env, cwd=context.dialogue_dir,
+                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+                what=f"{where}: capability probe {' '.join(argv[:2])}",
+            )
+        except AdapterError as exc:
+            return {"ok": False, "error": str(exc), "probe": {"argv": list(argv)}}
+        raw_output = (result.stdout or result.stderr or "")
+        try:
+            ok = bool(check(raw_output, result.returncode))
+        except Exception as exc:  # a broken check must fail closed, not crash
+            return {
+                "ok": False,
+                "error": f"capability check failed: {exc}",
+                "probe": {"argv": list(argv)},
+            }
+        stripped = raw_output.strip()
+        probe_record: dict = {
+            "argv": list(argv),
+            "exit_status": result.returncode,
+            "output": stripped[:500],
+            # The hash attests the FULL probe output, computed before
+            # the 500-char storage truncation (cli_version parity).
+            "output_sha256": artifacts.sha256_bytes(raw_output.encode("utf-8")),
+        }
+        if len(stripped) > 500:
+            probe_record["output_truncated"] = True
+        return {"ok": ok, "probe": probe_record}
+
+    def probe_capabilities(self, context: PrepareContext) -> dict:
+        """Build the capability manifest by probing the CLI itself.
+
+        ``cli-version`` is always probed when the adapter names a version
+        argv; adapter-specific probes come from ``capability_probes``.
+        """
+        where = f"actor {context.actor.actor_id!r} ({self.name})"
+        capabilities: dict[str, dict] = {}
+        try:
+            version_argv = self.version_probe_argv(context)
+        except AdapterError as exc:
+            capabilities["cli-version"] = {"ok": False, "error": str(exc)}
+        else:
+            if version_argv is not None:
+                capabilities["cli-version"] = self._run_capability_probe(
+                    version_argv,
+                    lambda output, rc: rc == 0,
+                    context,
+                    where,
+                )
+        try:
+            extra_probes = self.capability_probes(context)
+        except AdapterError as exc:
+            # A broken hook must not crash the gate: its capabilities
+            # simply never show up as ok, and the error is recorded.
+            extra_probes = {}
+            hook_error = str(exc)
+        else:
+            hook_error = None
+        for name, (argv, check) in extra_probes.items():
+            capabilities[name] = self._run_capability_probe(
+                argv, check, context, where
+            )
+        manifest: dict = {
+            "capabilities": capabilities,
+            "probed_at": utc_now(),
+        }
+        if hook_error is not None:
+            manifest["hook_error"] = hook_error
+        return manifest
+
     def cli_version_evidence(self, context: PrepareContext) -> dict | None:
         """Probe the adapter CLI version for the evidence record.
 
@@ -270,6 +372,14 @@ class Adapter(ABC):
         cli_version = self.cli_version_evidence(context)
         if cli_version is not None:
             record["cli_version"] = cli_version
+        if context.actor.required_capabilities:
+            # The evidence records the SAME manifest that gated the
+            # launch (attached to the context by the runner); a fresh
+            # probe only happens if execute ran without the gate.
+            manifest = context.capability_manifest
+            if manifest is None:
+                manifest = self.probe_capabilities(context)
+            record["capability_manifest"] = manifest
         return record
 
 

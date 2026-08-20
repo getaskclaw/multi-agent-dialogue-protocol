@@ -19,6 +19,7 @@ shape serves every transport.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import secrets
@@ -277,6 +278,29 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
         packet = adapter.prepare(context)
     except adapters.AdapterError as exc:
         raise engine.ProtocolError(str(exc)) from exc
+
+    # Capability gate: when the definition requires capabilities, the
+    # engine probes them from the CLI itself and refuses the launch
+    # before any claim or runtime spawn.
+    required = context.actor.required_capabilities
+    if required:
+        try:
+            manifest = adapter.probe_capabilities(context)
+        except adapters.AdapterError as exc:
+            raise engine.ProtocolError(str(exc)) from exc
+        missing = [
+            name
+            for name in required
+            if not manifest["capabilities"].get(name, {}).get("ok")
+        ]
+        if missing:
+            raise engine.ProtocolError(
+                f"actor {actor_id!r} requires capabilities the probed CLI "
+                f"does not show: {missing}; launch refused before any "
+                "runtime spawn"
+            )
+        # The evidence must record exactly what gated the launch.
+        context = dataclasses.replace(context, capability_manifest=manifest)
 
     dialogue.claim(actor_id)
     # Forensics are best-effort: a receipt that cannot be written must
