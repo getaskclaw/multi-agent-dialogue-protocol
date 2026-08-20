@@ -27,7 +27,7 @@ __all__ = [
 
 # The evidence-record version adapters write per turn: the latest the
 # engine supports. The canonical support list lives in config.py.
-EVIDENCE_VERSION = SUPPORTED_EVIDENCE_VERSIONS[-1]
+EVIDENCE_VERSION = max(SUPPORTED_EVIDENCE_VERSIONS)
 
 REQUIRED_FIELDS = (
     "evidence_version",
@@ -102,7 +102,12 @@ def validate_evidence(
         return errors
 
     version = record["evidence_version"]
-    if version not in accepted_versions:
+    if isinstance(version, bool) or not isinstance(version, int):
+        # 1.0 and True compare equal to 1; only a real integer binds.
+        errors.append(
+            f"evidence_version must be an integer, got {version!r}"
+        )
+    elif version not in accepted_versions:
         errors.append(
             f"evidence_version {version!r} is not accepted by this "
             f"dialogue definition (accepted: {sorted(accepted_versions)})"
