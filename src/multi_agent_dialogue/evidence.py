@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from .artifacts import ArtifactError, read_bytes_nofollow, sha256_file
-from .config import Actor, TurnSpec
+from .config import SUPPORTED_EVIDENCE_VERSIONS, Actor, TurnSpec
 
 __all__ = [
     "EvidenceError",
@@ -25,7 +25,9 @@ __all__ = [
     "sha256_file",
 ]
 
-EVIDENCE_VERSION = 1
+# The evidence-record version adapters write per turn: the latest the
+# engine supports. The canonical support list lives in config.py.
+EVIDENCE_VERSION = SUPPORTED_EVIDENCE_VERSIONS[-1]
 
 REQUIRED_FIELDS = (
     "evidence_version",
@@ -78,8 +80,17 @@ def validate_evidence(
     actor: Actor,
     turn: TurnSpec,
     artifact_sha256: str,
+    accepted_versions: tuple[int, ...] | None = None,
 ) -> list[str]:
-    """Return every reason this evidence fails; empty list means valid."""
+    """Return every reason this evidence fails; empty list means valid.
+
+    ``accepted_versions`` is the closed set declared by the dialogue
+    definition (``definition.evidence_versions``); None falls back to the
+    engine-supported set. A record whose evidence_version sits outside
+    the set fails closed even when every other field is perfect.
+    """
+    if accepted_versions is None:
+        accepted_versions = SUPPORTED_EVIDENCE_VERSIONS
     errors: list[str] = []
     if not isinstance(record, dict):
         return ["evidence must be a JSON object"]
@@ -90,10 +101,17 @@ def validate_evidence(
     if errors:
         return errors
 
-    if record["evidence_version"] != EVIDENCE_VERSION:
+    version = record["evidence_version"]
+    if version not in accepted_versions:
         errors.append(
-            f"unsupported evidence_version: {record['evidence_version']!r}"
+            f"evidence_version {version!r} is not accepted by this "
+            f"dialogue definition (accepted: {sorted(accepted_versions)})"
         )
+    elif version not in SUPPORTED_EVIDENCE_VERSIONS:
+        # Defense in depth: even a caller that hand-passes a wider
+        # accepted set cannot make the engine read a record layout it
+        # does not understand.
+        errors.append(f"unsupported evidence_version: {version!r}")
     if record["actor_id"] != actor.actor_id:
         errors.append(
             f"evidence actor_id {record['actor_id']!r} does not match "

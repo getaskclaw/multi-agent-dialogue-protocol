@@ -16,6 +16,12 @@ from typing import Any
 
 KNOWN_TRANSPORTS = ("command", "fable-session", "hermes-cli")
 
+# Evidence-record versions this engine can interpret. A dialogue
+# definition binds to a subset via `evidence_versions`; a version the
+# engine cannot interpret must never be accepted, even if a definition
+# names it. The latest entry is the version adapters write per turn.
+SUPPORTED_EVIDENCE_VERSIONS = (1,)
+
 DEFAULT_OWNER_DECISIONS = ("APPROVE", "REJECT", "NEED_MORE_EVIDENCE")
 
 _ACTOR_KEYS = {
@@ -63,6 +69,10 @@ class ProtocolDefinition:
     source_sha: str
     evidence_roots: tuple[str, ...]
     owner_decisions: tuple[str, ...]
+    # Closed set of evidence-record versions this dialogue accepts,
+    # guaranteed ⊆ SUPPORTED_EVIDENCE_VERSIONS at parse time. A turn whose
+    # evidence_version is outside this set fails closed.
+    evidence_versions: tuple[int, ...] = SUPPORTED_EVIDENCE_VERSIONS
     # Optional external owner-proof verifier command. When empty, the
     # engine records the owner decision as caller-identity "unverified":
     # nothing authenticates WHO invoked owner-decide.
@@ -217,6 +227,35 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
         errors.append("definition: owner_decisions must be a non-empty list of strings")
         decisions_raw = list(DEFAULT_OWNER_DECISIONS)
 
+    versions_raw = raw.get("evidence_versions", list(SUPPORTED_EVIDENCE_VERSIONS))
+    if (
+        not isinstance(versions_raw, list)
+        or not versions_raw
+        or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 1
+            for item in versions_raw
+        )
+    ):
+        errors.append(
+            "definition: evidence_versions must be a non-empty list of "
+            "positive integers (the closed set of evidence-record versions "
+            "this dialogue accepts)"
+        )
+        versions_raw = list(SUPPORTED_EVIDENCE_VERSIONS)
+    else:
+        unsupported = sorted(
+            {item for item in versions_raw if item not in SUPPORTED_EVIDENCE_VERSIONS}
+        )
+        if unsupported:
+            errors.append(
+                f"definition: evidence_versions {unsupported} are not "
+                f"interpretable by this engine (supported: "
+                f"{list(SUPPORTED_EVIDENCE_VERSIONS)}); a version the engine "
+                "cannot read must never be accepted"
+            )
+        if len(set(versions_raw)) != len(versions_raw):
+            errors.append("definition: evidence_versions contains duplicates")
+
     actors_raw = raw.get("actors")
     actors: list[Actor] = []
     if not isinstance(actors_raw, list):
@@ -287,6 +326,7 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
         source_sha=source_sha,
         evidence_roots=tuple(evidence_roots_raw),
         owner_decisions=tuple(decisions_raw),
+        evidence_versions=tuple(versions_raw),
         owner_proof_argv=tuple(owner_proof_raw),
         # Snapshot so later caller mutations cannot change the digest.
         raw=json.loads(canonical_json(raw)),

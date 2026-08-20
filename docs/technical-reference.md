@@ -364,6 +364,10 @@ the humans or schedulers around the protocol.
 - published turns are immutable; any byte change flips the dialogue to
   `BLOCKED` before the next completion or decision;
 - missing, malformed, or mismatched runtime evidence blocks completion;
+- a turn `evidence_version` outside the definition's declared
+  `evidence_versions` set blocks completion even when every other field
+  is perfect; versions the engine cannot interpret are refused at
+  definition load, even when a definition lists them;
 - failed/timeout terminal outcomes block completion;
 - a missing, unknown, or laundered `completed_via` is a structural
   Git-provenance error; only `run --launch` can record

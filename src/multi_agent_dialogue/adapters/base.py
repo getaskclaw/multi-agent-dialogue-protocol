@@ -24,8 +24,7 @@ from pathlib import Path
 
 from .. import artifacts
 from ..config import Actor, TurnSpec
-
-EVIDENCE_VERSION = 1
+from ..evidence import EVIDENCE_VERSION
 
 
 class AdapterError(RuntimeError):

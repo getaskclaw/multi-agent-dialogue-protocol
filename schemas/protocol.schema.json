@@ -32,6 +32,12 @@
       "items": {"type": "string", "minLength": 1},
       "description": "Optional external owner-proof verifier command ({decision_file} is substituted). Without it, owner-decide records caller_identity as 'unverified': nothing authenticates WHO invoked the decision."
     },
+    "evidence_versions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "integer", "minimum": 1},
+      "description": "Closed set of evidence-record versions this dialogue accepts (default: the engine-supported set). A turn whose evidence_version is outside this set fails closed; versions the engine cannot interpret are rejected at definition load even if listed."
+    },
     "actors": {
       "type": "array",
       "minItems": 2,

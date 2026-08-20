@@ -190,5 +190,53 @@ class SchemaCrossCheckTests(unittest.TestCase):
             self.assertGreaterEqual(len(definition.actors), 2)
 
 
+class EvidenceVersionsDefinitionTests(unittest.TestCase):
+    """The definition pins the closed set of evidence-record versions it
+    accepts; versions the engine cannot interpret are rejected at load
+    even when a definition names them."""
+
+    def test_default_binds_to_engine_supported_set(self) -> None:
+        definition = config.parse_definition(support.two_actor_definition())
+        self.assertEqual(
+            definition.evidence_versions, config.SUPPORTED_EVIDENCE_VERSIONS
+        )
+
+    def test_explicit_supported_version_accepted(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = [1]
+        definition = config.parse_definition(raw)
+        self.assertEqual(definition.evidence_versions, (1,))
+
+    def test_engine_unknown_version_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = [1, 2]
+        with self.assertRaisesRegex(config.ConfigError, "not interpretable"):
+            config.parse_definition(raw)
+
+    def test_empty_list_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = []
+        with self.assertRaisesRegex(config.ConfigError, "evidence_versions"):
+            config.parse_definition(raw)
+
+    def test_non_integer_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = ["1"]
+        with self.assertRaisesRegex(config.ConfigError, "evidence_versions"):
+            config.parse_definition(raw)
+
+    def test_boolean_is_not_an_integer_here(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = [True]
+        with self.assertRaisesRegex(config.ConfigError, "evidence_versions"):
+            config.parse_definition(raw)
+
+    def test_duplicates_rejected(self) -> None:
+        raw = support.two_actor_definition()
+        raw["evidence_versions"] = [1, 1]
+        with self.assertRaisesRegex(config.ConfigError, "duplicates"):
+            config.parse_definition(raw)
+
+
 if __name__ == "__main__":
     unittest.main()
