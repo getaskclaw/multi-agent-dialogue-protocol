@@ -62,6 +62,14 @@ class ClaudeFableAdapter(Adapter):
     name = "claude-fable"
     transport = "fable-session"
 
+    def version_probe_argv(self, context: PrepareContext) -> list[str]:
+        settings = context.actor.settings
+        where = f"actor {context.actor.actor_id!r} (claude-fable)"
+        command_name = require_str_setting(
+            settings, "command_name", where, "fable-session"
+        )
+        return [command_name, "--version"]
+
     # -- packet ------------------------------------------------------------
 
     def _settings(self, context: PrepareContext) -> dict:

@@ -102,6 +102,12 @@ class HermesAdapter(Adapter):
             f"{secrets.token_hex(4)}"
         )
 
+    def version_probe_argv(self, context: PrepareContext) -> list[str]:
+        settings = context.actor.settings
+        where = f"actor {context.actor.actor_id!r} (hermes)"
+        command_name = require_str_setting(settings, "command_name", where)
+        return [command_name, "--version"]
+
     def _argv(self, command_name: str, prompt: str, source: str) -> tuple[str, ...]:
         return (
             command_name,
