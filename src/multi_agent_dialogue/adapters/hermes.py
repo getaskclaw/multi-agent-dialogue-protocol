@@ -26,7 +26,8 @@ message + positive API-call usage, and the evidence labels that basis
 terminal fields ARE present they must be
 consistent (``ended_at`` inside the invocation window, never an
 ``end_reason`` without an ``ended_at``) and clean (``end_reason`` NULL,
-empty, or exactly ``completed``); anything else fails closed.
+empty, ``completed``, or ``cli_close`` — the normal one-shot exit reason
+written by Hermes v0.20+); anything else fails closed.
 
 Two Hermes actors are only independent if they use two different
 ``hermes_home`` directories; the setting is mandatory and never derived
@@ -59,10 +60,14 @@ PROMPT_PLACEHOLDER = "{task_briefing}"
 # invocation window (same host, same clock; generous margin).
 WINDOW_SLACK_SECONDS = 5.0
 
-# The only persisted end_reason that counts as a clean completion.
+# Persisted end_reason values that count as a clean completion.
 # Both terminal fields may be NULL; an unset reason is handled
-# separately from this value.
-CLEAN_END_REASON = "completed"
+# separately from these values. "cli_close" is how Hermes v0.20+
+# finalizes one-shot (-q/-Q) sessions on normal CLI exit
+# (_flush_one_shot_session_store in cli.py); it carries the same
+# meaning as "completed" for the one-shot contract and is still gated
+# by ended_at consistency plus the process-exit terminal basis below.
+CLEAN_END_REASONS = frozenset({"completed", "cli_close"})
 
 # Proof labels for what actually established the turn's completion.
 TERMINAL_BASIS_DB = "state-db-ended"
@@ -265,7 +270,7 @@ class HermesAdapter(Adapter):
                         f"{end_reason!r} without a usable ended_at; terminal "
                         "fields are inconsistent and completion is refused"
                     )
-                if end_reason != CLEAN_END_REASON:
+                if end_reason not in CLEAN_END_REASONS:
                     raise AdapterError(
                         f"{where}: session {session_id} ended with reason "
                         f"{end_reason!r}, not a clean completion"

@@ -738,6 +738,15 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
         self.assertEqual(observed["ended_at"], self.before + 2.0)
         self.assertEqual(observed["end_reason"], "completed")
 
+    def test_ended_with_cli_close_reason_is_accepted(self) -> None:
+        # Hermes v0.20+ finalizes one-shot (-q/-Q) sessions with
+        # end_reason "cli_close" on normal CLI exit; it must count as a
+        # clean completion exactly like "completed".
+        self.build_db(ended_at=self.before + 2.0, end_reason="cli_close")
+        observed = self.observe()
+        self.assertEqual(observed["ended_at"], self.before + 2.0)
+        self.assertEqual(observed["end_reason"], "cli_close")
+
     def test_ended_with_unset_reason_is_accepted(self) -> None:
         for reason in (None, ""):
             with self.subTest(reason=reason):
