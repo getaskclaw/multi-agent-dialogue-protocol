@@ -253,5 +253,111 @@ class ValidateAndOwnerTests(CliTestCase):
         self.assertNotEqual(again.returncode, 0)
 
 
+class CanaryTests(unittest.TestCase):
+    """`madp canary` exercises the real acceptance path end to end."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+
+    def run_canary(self, adapter: str, *extra: str,
+                   dirname: str = "canary") -> subprocess.CompletedProcess:
+        return run_cli(
+            "canary", "--adapter", adapter,
+            "--dialogue", str(self.base / dirname), *extra,
+        )
+
+    def run_cli_dir(self, path: Path) -> subprocess.CompletedProcess:
+        return run_cli("canary", "--adapter", "command", "--dialogue", str(path))
+
+    def test_canary_command_adapter_passes(self) -> None:
+        result = self.run_canary("command", "--no-push")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["validation_ok"])
+        self.assertEqual(payload["turn"]["completed_via"], "runner-launch")
+        self.assertTrue(payload["local_only"])
+        cli = payload["cli_version"]
+        self.assertEqual(cli["exit_status"], 0)
+        self.assertIn("fake-worker", cli["output"])
+
+    def test_canary_hermes_adapter_passes(self) -> None:
+        result = self.run_canary("hermes-cli")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertIn("fake-hermes", payload["cli_version"]["output"])
+
+    def test_canary_fable_adapter_passes(self) -> None:
+        result = self.run_canary("fable-session")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertIn("fake-fable-session", payload["cli_version"]["output"])
+
+    def test_sabotaged_turn_fails_validation_afterwards(self) -> None:
+        # The canary dialogue is a real Git-backed dialogue: tampering
+        # with the published turn must flip the production gate to
+        # non-zero, with no new commit and nothing pushed anywhere.
+        result = self.run_canary("command")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dialogue = self.base / "canary"
+        turn_files = list((dialogue / "turns").glob("*.md"))
+        self.assertEqual(len(turn_files), 1)
+        before = subprocess.run(
+            ["git", "-C", str(dialogue), "rev-list", "--count", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        with turn_files[0].open("a", encoding="utf-8") as handle:
+            handle.write("\nsabotage\n")
+        validation = run_cli(
+            "validate", str(dialogue),
+            "--require-git", "--require-runner-completion",
+        )
+        self.assertEqual(validation.returncode, 1)
+        after = subprocess.run(
+            ["git", "-C", str(dialogue), "rev-list", "--count", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(before, after, "validation never commits")
+
+    def test_non_empty_dialogue_dir_is_rejected(self) -> None:
+        target = self.base / "occupied"
+        target.mkdir()
+        (target / "stale.txt").write_text("x", encoding="utf-8")
+        result = self.run_cli_dir(target)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not empty", result.stderr)
+
+    def test_dialogue_path_that_is_a_file_is_rejected(self) -> None:
+        target = self.base / "a-file"
+        target.write_text("x", encoding="utf-8")
+        result = self.run_cli_dir(target)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_stale_scratch_dir_is_rejected(self) -> None:
+        (self.base / "canary.canary-scratch").mkdir()
+        result = self.run_canary("command")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exists", result.stderr)
+
+    def test_expected_identity_flags_require_command_name(self) -> None:
+        result = self.run_canary(
+            "hermes-cli", "--expected-model", "some-model"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("only meaningful", result.stderr)
+
+    def test_real_binary_override_requires_explicit_identity(self) -> None:
+        result = self.run_canary(
+            "hermes-cli", "--command-name", "/bin/true"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("never guesses identity", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
