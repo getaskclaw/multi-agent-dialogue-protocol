@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import tempfile
 from datetime import datetime, timezone
@@ -72,6 +73,199 @@ class ProtocolError(RuntimeError):
     """A dialogue transition is not allowed; nothing was changed."""
 
 
+def resolve_actor_selection(
+    turn: config.TurnSpec,
+    actor_id: str,
+    substitution_reason: str | None = None,
+) -> tuple[str, str | None]:
+    """Validate one primary/substitute selection against the frozen turn."""
+    if actor_id not in turn.allowed_actor_ids:
+        raise ProtocolError(
+            f"{actor_id!r} is not an allowed actor for {turn.round_id}; "
+            f"primary actor is {turn.actor_id!r}, allowed actors are "
+            f"{list(turn.allowed_actor_ids)!r}"
+        )
+    if substitution_reason is not None:
+        if not isinstance(substitution_reason, str) or not substitution_reason.strip():
+            raise ProtocolError(
+                "substitution_reason must be a non-empty reason code when "
+                f"given, got {substitution_reason!r}"
+            )
+        reason: str | None = substitution_reason.strip()
+    else:
+        reason = None
+    if actor_id == turn.actor_id:
+        if reason is not None:
+            raise ProtocolError(
+                f"primary actor {actor_id!r} must not claim a substitution reason"
+            )
+        return "primary", None
+    if reason is None:
+        raise ProtocolError(
+            f"substitute actor {actor_id!r} requires a substitution reason; "
+            f"allowed reasons are {list(turn.substitution_reasons)!r}"
+        )
+    if reason not in turn.substitution_reasons:
+        raise ProtocolError(
+            f"substitution reason {reason!r} is not allowed for {turn.round_id}; "
+            f"allowed reasons are {list(turn.substitution_reasons)!r}"
+        )
+    return "substitute", reason
+
+
+def selection_record_errors(
+    turn: config.TurnSpec,
+    actor_id: object,
+    record: object,
+    label: str,
+) -> list[str]:
+    """Validate persisted primary/substitute identity fields.
+
+    Historical primary-only turns may omit the three fields added by the
+    substitute-actor extension. Once a frozen turn allows substitutes, every
+    route is explicit: primary and substitute records both carry all fields.
+    """
+    if not isinstance(record, dict):
+        return [f"{label} is not an object"]
+    errors: list[str] = []
+    if actor_id not in turn.allowed_actor_ids:
+        return [
+            f"{label} actor {actor_id!r} is not allowed for {turn.round_id}; "
+            f"allowed actors are {list(turn.allowed_actor_ids)!r}"
+        ]
+    expected_selection = "primary" if actor_id == turn.actor_id else "substitute"
+    requires_explicit_identity = bool(turn.substitute_actor_ids)
+    if requires_explicit_identity or expected_selection == "substitute":
+        missing = [
+            key
+            for key in (
+                "scheduled_actor_id",
+                "actor_selection",
+                "substitution_reason",
+            )
+            if key not in record
+        ]
+        if missing:
+            errors.append(
+                f"{label} explicit actor identity fields are missing: {missing}"
+            )
+    legacy_primary = expected_selection == "primary" and not turn.substitute_actor_ids
+    scheduled_default = turn.actor_id if legacy_primary else None
+    selection_default = "primary" if legacy_primary else None
+    recorded_scheduled = record.get("scheduled_actor_id", scheduled_default)
+    recorded_selection = record.get("actor_selection", selection_default)
+    substitution_reason = record.get("substitution_reason")
+    if recorded_scheduled != turn.actor_id:
+        errors.append(
+            f"{label} scheduled_actor_id {recorded_scheduled!r} does not match "
+            f"frozen primary actor {turn.actor_id!r}"
+        )
+    if recorded_selection != expected_selection:
+        errors.append(
+            f"{label} actor_selection {recorded_selection!r} does not match "
+            f"actual selection {expected_selection!r}"
+        )
+    if expected_selection == "primary" and substitution_reason is not None:
+        errors.append(
+            f"{label} primary actor records unexpected substitution_reason "
+            f"{substitution_reason!r}"
+        )
+    if expected_selection == "substitute" and (
+        not isinstance(substitution_reason, str)
+        or substitution_reason not in turn.substitution_reasons
+    ):
+        errors.append(
+            f"{label} substitute records invalid substitution_reason "
+            f"{substitution_reason!r}; allowed reasons are "
+            f"{list(turn.substitution_reasons)!r}"
+        )
+    return errors
+
+
+def hermes_profile_isolation_errors(
+    definition: config.ProtocolDefinition,
+    dialogue_directory: Path,
+    turn: config.TurnSpec | None = None,
+) -> list[str]:
+    """Prove primary/substitute Hermes actors use distinct canonical profiles."""
+    errors: list[str] = []
+    pairs: list[tuple[config.TurnSpec, str]] = []
+    if turn is not None:
+        pairs.extend((turn, item) for item in turn.substitute_actor_ids)
+    else:
+        for spec in definition.schedule:
+            pairs.extend((spec, item) for item in spec.substitute_actor_ids)
+
+    def canonical_home(actor: config.Actor) -> Path | None:
+        raw = actor.settings.get("hermes_home")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        path = Path(raw)
+        if not path.is_absolute():
+            path = dialogue_directory / path
+        return path.resolve(strict=False)
+
+    for spec, substitute_id in pairs:
+        primary = definition.actor(spec.actor_id)
+        substitute = definition.actor(substitute_id)
+        if primary.transport != "hermes-cli" or substitute.transport != "hermes-cli":
+            continue
+        primary_home = canonical_home(primary)
+        substitute_home = canonical_home(substitute)
+        label = f"turn {spec.round_id} Hermes primary/substitute profile isolation"
+        if primary_home is None or substitute_home is None:
+            errors.append(f"{label} requires non-empty hermes_home settings")
+        elif primary_home == substitute_home:
+            errors.append(
+                f"{label} failed: actors {spec.actor_id!r} and {substitute_id!r} "
+                "resolve to the same HERMES_HOME"
+            )
+    return errors
+
+
+def commit_trailer_errors(
+    root: Path,
+    commit: str,
+    expected: dict[str, str],
+    label: str,
+    optional_missing: set[str] | None = None,
+) -> list[str]:
+    """Validate the exact event-specific Madp-* trailer contract."""
+    errors: list[str] = []
+    expected_folded = {
+        key.casefold(): (key, value) for key, value in expected.items()
+    }
+    optional_folded = {key.casefold() for key in (optional_missing or set())}
+    try:
+        pairs = gitops.commit_trailers(root, commit)
+    except gitops.GitError as exc:
+        return [f"{label}: cannot read Git trailers: {exc}"]
+    trailers: dict[str, tuple[str, str]] = {}
+    for key, value in pairs:
+        folded = key.casefold()
+        if not folded.startswith("madp-"):
+            continue
+        canonical = expected_folded.get(folded, (None, ""))[0]
+        if canonical is not None and key != canonical:
+            errors.append(
+                f"{label}: non-canonical Git trailer spelling {key!r}; "
+                f"expected {canonical!r}"
+            )
+        if folded in trailers:
+            errors.append(f"{label}: duplicate Git trailer {key!r}")
+            continue
+        trailers[folded] = (key, value)
+    for folded in sorted(set(trailers) - set(expected_folded)):
+        errors.append(f"{label}: unexpected Git trailer {trailers[folded][0]!r}")
+    for folded, (key, wanted) in expected_folded.items():
+        if folded in optional_folded and folded not in trailers:
+            continue
+        actual = trailers.get(folded)
+        if actual is None or actual[1] != wanted:
+            errors.append(f"{label}: Git trailer {key} does not match committed data")
+    return errors
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -118,8 +312,65 @@ def atomic_write_json(path: Path, payload: dict) -> None:
         os.close(dir_fd)
 
 
+def verify_continuation_anchor(definition: config.ProtocolDefinition) -> None:
+    """Verify an optional imported-history anchor against bytes and Git."""
+    anchor = definition.continuation
+    if anchor is None:
+        return
+    _verify_continuation_artifact_bytes(anchor)
+    _verify_continuation_git_facts(anchor)
+
+
+def _verify_continuation_artifact_bytes(anchor) -> None:
+    path = Path(anchor.artifact_path)
+    try:
+        current = artifacts.read_bytes_nofollow(path, "continuation artifact")
+    except artifacts.ArtifactError as exc:
+        raise ProtocolError(str(exc)) from exc
+    if artifacts.sha256_bytes(current) != anchor.artifact_sha256:
+        raise ProtocolError(
+            f"continuation artifact hash mismatch for {anchor.protocol_id}/"
+            f"{anchor.round_id}"
+        )
+
+
+def _verify_continuation_git_facts(anchor) -> None:
+    path = Path(anchor.artifact_path)
+    source_root = gitops.worktree_root(path.parent)
+    if source_root is None:
+        raise ProtocolError("continuation artifact is not inside a Git worktree")
+    try:
+        rel = gitops.rel_to_root(source_root, path)
+    except ValueError as exc:
+        raise ProtocolError("continuation artifact escaped its Git worktree") from exc
+    if gitops.first_commit_adding(source_root, rel) != anchor.published_commit:
+        raise ProtocolError(
+            "continuation published_commit is not the artifact's publication commit"
+        )
+    if not gitops.is_ancestor(
+        source_root, anchor.published_commit, anchor.original_dialogue_head
+    ):
+        raise ProtocolError(
+            "continuation publication is not an ancestor of original_dialogue_head"
+        )
+    for commit, label in (
+        (anchor.published_commit, "published_commit"),
+        (anchor.original_dialogue_head, "original_dialogue_head"),
+    ):
+        if gitops.committed_sha256(source_root, commit, rel) != anchor.artifact_sha256:
+            raise ProtocolError(
+                f"continuation artifact bytes do not match {label}"
+            )
+
+
 def init_dialogue(definition: config.ProtocolDefinition, directory: Path | str) -> "Dialogue":
+    verify_continuation_anchor(definition)
     directory = Path(directory)
+    isolation_errors = hermes_profile_isolation_errors(
+        definition, directory.resolve(strict=False)
+    )
+    if isolation_errors:
+        raise ProtocolError("\n".join(isolation_errors))
     _reject_symlink(directory, "dialogue directory")
     if (directory / STATE_FILE).exists() or (directory / DEFINITION_FILE).exists():
         raise ProtocolError(f"dialogue already initialized: {directory}")
@@ -158,6 +409,10 @@ def init_dialogue(definition: config.ProtocolDefinition, directory: Path | str) 
     }
     atomic_write_json(directory / STATE_FILE, state)
     dialogue = Dialogue(directory)
+    if definition.continuation is not None:
+        # init just verified the anchor's Git facts above; do not spawn
+        # the same subprocesses again on the first state() read.
+        dialogue._continuation_git_verified = True
     try:
         gitops.commit_paths(
             root,
@@ -185,6 +440,10 @@ class Dialogue:
         _reject_symlink(self.directory, "dialogue directory")
         if not self.directory.is_dir():
             raise ProtocolError(f"not a dialogue directory: {self.directory}")
+        # Content-addressed Git facts of a continuation anchor are
+        # verified once per Dialogue instance (see state()); the artifact
+        # bytes themselves are re-hashed on every read.
+        self._continuation_git_verified = False
 
     # -- loading ---------------------------------------------------------
 
@@ -218,6 +477,18 @@ class Dialogue:
             raise ProtocolError(
                 "definition digest mismatch: definition.json was modified after init"
             )
+        anchor = definition.continuation
+        if anchor is not None:
+            # The live artifact bytes are re-read and re-hashed on every
+            # state read (no subprocess, tamper-evident). The Git-side
+            # facts are content-addressed and verified once per Dialogue
+            # instance; spawning several git subprocesses per read is
+            # pure cost on validate/report paths that call state()
+            # repeatedly.
+            _verify_continuation_artifact_bytes(anchor)
+            if not self._continuation_git_verified:
+                _verify_continuation_git_facts(anchor)
+                self._continuation_git_verified = True
         return state
 
     def _write_state(self, state: dict) -> dict:
@@ -249,7 +520,12 @@ class Dialogue:
 
     # -- claims ----------------------------------------------------------
 
-    def claim(self, actor_id: str, expected_revision: int | None = None) -> dict:
+    def claim(
+        self,
+        actor_id: str,
+        expected_revision: int | None = None,
+        substitution_reason: str | None = None,
+    ) -> dict:
         definition = self.definition()
         try:
             definition.actor(actor_id)
@@ -269,14 +545,20 @@ class Dialogue:
                 f"at {claim.get('claimed_at')!r}"
             )
         turn = definition.schedule[int(state["turn_index"])]
-        if turn.actor_id != actor_id:
-            raise ProtocolError(
-                f"{actor_id!r} is not the scheduled actor for {turn.round_id}; "
-                f"next actor is {turn.actor_id!r}"
-            )
+        actor_selection, substitution_reason = resolve_actor_selection(
+            turn, actor_id, substitution_reason
+        )
+        isolation_errors = hermes_profile_isolation_errors(
+            definition, self.directory, turn
+        )
+        if isolation_errors:
+            raise ProtocolError("\n".join(isolation_errors))
 
         claim = {
             "actor_id": actor_id,
+            "scheduled_actor_id": turn.actor_id,
+            "actor_selection": actor_selection,
+            "substitution_reason": substitution_reason,
             "round_id": turn.round_id,
             "nonce": secrets.token_hex(16),
             "claimed_at": utc_now(),
@@ -416,10 +698,17 @@ class Dialogue:
                 f"turn is claimed by {claim.get('actor_id')!r}, not {actor_id!r}"
             )
         turn = definition.schedule[int(state["turn_index"])]
-        if turn.actor_id != actor_id:
-            raise ProtocolError(
-                f"{actor_id!r} is not the scheduled actor for {turn.round_id}"
-            )
+        actor_selection, substitution_reason = resolve_actor_selection(
+            turn, actor_id, claim.get("substitution_reason")
+        )
+        isolation_errors = hermes_profile_isolation_errors(
+            definition, self.directory, turn
+        )
+        if isolation_errors:
+            raise ProtocolError("\n".join(isolation_errors))
+        claim_errors = selection_record_errors(turn, actor_id, claim, "active claim")
+        if claim_errors:
+            raise ProtocolError("invalid active claim:\n- " + "\n- ".join(claim_errors))
 
         history_errors = self._verify_history(state)
         if history_errors:
@@ -445,8 +734,12 @@ class Dialogue:
 
         actor = definition.actor(actor_id)
         evidence_errors = evidence.validate_evidence(
-            record, actor=actor, turn=turn, artifact_sha256=artifact_sha,
+            record,
+            actor=actor,
+            turn=turn,
+            artifact_sha256=artifact_sha,
             accepted_versions=definition.evidence_versions,
+            substitution_reason=substitution_reason,
         )
         if evidence_errors:
             raise ProtocolError(
@@ -462,15 +755,34 @@ class Dialogue:
                 "previous turn; each turn needs an independent runtime session"
             )
 
-        if turn.word_limit is not None:
+        turn_text: str | None = None
+        if turn.word_limit is not None or (
+            turn.round_id == definition.final_round_id
+            and definition.agent_final_statuses
+        ):
             try:
-                count = artifacts.word_count(turn_data.decode("utf-8"))
+                turn_text = turn_data.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ProtocolError(f"turn artifact is not UTF-8: {exc}") from exc
+        if turn.word_limit is not None:
+            assert turn_text is not None
+            count = artifacts.word_count(turn_text)
             if count > turn.word_limit:
                 raise ProtocolError(
                     f"turn body has {count} words, over the {turn.word_limit} "
                     f"word limit for {turn.round_id}"
+                )
+        if turn.round_id == definition.final_round_id and definition.agent_final_statuses:
+            assert turn_text is not None
+            statuses = re.findall(r"(?m)^Status:[ \t]*(\S+)[ \t]*\r?$", turn_text)
+            if len(statuses) != 1:
+                raise ProtocolError(
+                    "final turn must contain exactly one line 'Status: <VALUE>'"
+                )
+            if statuses[0] not in definition.agent_final_statuses:
+                raise ProtocolError(
+                    f"final agent status {statuses[0]!r} is not allowed; expected "
+                    f"one of {list(definition.agent_final_statuses)!r}"
                 )
 
         artifact_rel = f"{TURNS_DIR}/{turn.round_id}-{actor_id}.md"
@@ -485,6 +797,9 @@ class Dialogue:
             {
                 "round_id": turn.round_id,
                 "actor_id": actor_id,
+                "scheduled_actor_id": turn.actor_id,
+                "actor_selection": actor_selection,
+                "substitution_reason": substitution_reason,
                 "artifact_file": artifact_rel,
                 "artifact_sha256": published_sha,
                 "evidence_file": evidence_rel,
@@ -523,6 +838,9 @@ class Dialogue:
                     "Madp-Event": "turn",
                     "Madp-Round": turn.round_id,
                     "Madp-Actor": actor_id,
+                    "Madp-Scheduled-Actor": turn.actor_id,
+                    "Madp-Actor-Selection": actor_selection,
+                    "Madp-Substitution-Reason": substitution_reason or "none",
                     "Madp-Transport": actor.transport,
                     "Madp-Provider": record["provider"],
                     "Madp-Model": record["model"],
@@ -577,8 +895,6 @@ class Dialogue:
         return {"argv": argv, "exit_status": 0}
 
     def owner_decide(self, decision_path: Path | str) -> dict:
-        import re
-
         decision_path = Path(decision_path)
         definition = self.definition()
         state = self.state()
@@ -684,6 +1000,7 @@ class Dialogue:
             errors.append(str(exc))
 
         if definition is not None and state:
+            errors.extend(hermes_profile_isolation_errors(definition, self.directory))
             errors.extend(self._verify_history(state))
             completed = state.get("completed_turns", [])
             if int(state.get("turn_index", -1)) != len(completed):
@@ -704,16 +1021,17 @@ class Dialogue:
                         f"completed turn {position} is {record.get('round_id')!r}; "
                         f"schedule requires {spec.round_id!r}"
                     )
-                if record.get("actor_id") != spec.actor_id:
-                    errors.append(
-                        f"turn {spec.round_id} was completed by "
-                        f"{record.get('actor_id')!r}, schedule requires {spec.actor_id!r}"
+                actual_actor_id = record.get("actor_id")
+                errors.extend(
+                    selection_record_errors(
+                        spec, actual_actor_id, record, f"turn {spec.round_id}"
                     )
+                )
                 evidence_path = self.directory / record.get("evidence_file", "")
                 try:
                     evidence_record = evidence.load_evidence(evidence_path)
                     artifact_sha = record.get("artifact_sha256", "")
-                    actor = definition.actor(record.get("actor_id", ""))
+                    actor = definition.actor(actual_actor_id or "")
                     errors.extend(
                         f"{spec.round_id}: {item}"
                         for item in evidence.validate_evidence(
@@ -722,6 +1040,7 @@ class Dialogue:
                             turn=spec,
                             artifact_sha256=artifact_sha,
                             accepted_versions=definition.evidence_versions,
+                            substitution_reason=record.get("substitution_reason"),
                         )
                     )
                 except (evidence.EvidenceError, config.ConfigError) as exc:
@@ -750,6 +1069,19 @@ class Dialogue:
                 errors.append("state records an active claim but the claim lock file is missing")
             if not state.get("claim") and lock_exists:
                 errors.append("claim lock file exists without an active claim")
+            claim = state.get("claim")
+            if claim and int(state.get("turn_index", -1)) < len(definition.schedule):
+                spec = definition.schedule[int(state["turn_index"])]
+                if claim.get("round_id") != spec.round_id:
+                    errors.append(
+                        f"active claim round {claim.get('round_id')!r} does not match "
+                        f"next round {spec.round_id!r}"
+                    )
+                errors.extend(
+                    selection_record_errors(
+                        spec, claim.get("actor_id"), claim, "active claim"
+                    )
+                )
 
         provenance = self._git_provenance(require_git, state)
         if require_git:
@@ -811,6 +1143,9 @@ class Dialogue:
             row: dict = {
                 "round_id": round_id,
                 "actor_id": record.get("actor_id"),
+                "scheduled_actor_id": record.get("scheduled_actor_id"),
+                "actor_selection": record.get("actor_selection"),
+                "substitution_reason": record.get("substitution_reason"),
                 "completed_via": record.get("completed_via"),
                 "commit": (commits.get(round_id) or {}).get("commit"),
                 "artifact_file": record.get("artifact_file"),
@@ -964,6 +1299,7 @@ class Dialogue:
         store its own SHA, so provenance is always derived, never
         self-reported."""
         errors: list[str] = []
+        definition = self.definition()
 
         def rel(name: str) -> str:
             return gitops.rel_to_root(root, self.directory / name)
@@ -980,9 +1316,21 @@ class Dialogue:
                         "state in one init commit"
                     )
             provenance["init_commit"] = init_commit
+            errors.extend(
+                commit_trailer_errors(
+                    root,
+                    init_commit,
+                    {
+                        "Madp-Protocol": definition.protocol_id,
+                        "Madp-Event": "init",
+                        "Madp-Definition-Digest": definition.digest(),
+                    },
+                    "init commit",
+                )
+            )
 
-        def committed_state_at(commit: str) -> dict | None:
-            raw = gitops.committed_bytes(root, commit, state_rel)
+        def committed_json_at(commit: str, rel_path: str) -> dict | None:
+            raw = gitops.committed_bytes(root, commit, rel_path)
             if raw is None:
                 return None
             try:
@@ -990,6 +1338,9 @@ class Dialogue:
             except (ValueError, UnicodeDecodeError):
                 return None
             return loaded if isinstance(loaded, dict) else None
+
+        def committed_state_at(commit: str) -> dict | None:
+            return committed_json_at(commit, state_rel)
 
         turn_commits: list[dict] = []
         previous = init_commit
@@ -1044,6 +1395,9 @@ class Dialogue:
                 for key in (
                     "round_id",
                     "actor_id",
+                    "scheduled_actor_id",
+                    "actor_selection",
+                    "substitution_reason",
                     "artifact_sha256",
                     "evidence_sha256",
                     "session_id",
@@ -1072,16 +1426,87 @@ class Dialogue:
                         f"({record.get('completed_via')!r}); completion "
                         "provenance fails closed"
                     )
+                if position < len(definition.schedule):
+                    spec = definition.schedule[position]
+                    errors.extend(
+                        selection_record_errors(
+                            spec,
+                            entry.get("actor_id"),
+                            entry,
+                            f"turn {round_id} committed state",
+                        )
+                    )
+
+            committed_evidence = committed_json_at(commit, evidence_rel)
+            if committed_evidence is None:
+                errors.append(
+                    f"turn {round_id}: committed runtime evidence is not a JSON object"
+                )
+            if isinstance(entry, dict) and isinstance(committed_evidence, dict):
+                expected_trailers = {
+                    "Madp-Protocol": definition.protocol_id,
+                    "Madp-Event": "turn",
+                    "Madp-Round": str(entry.get("round_id")),
+                    "Madp-Actor": str(entry.get("actor_id")),
+                    "Madp-Scheduled-Actor": str(entry.get("scheduled_actor_id")),
+                    "Madp-Actor-Selection": str(entry.get("actor_selection")),
+                    "Madp-Substitution-Reason": str(
+                        entry.get("substitution_reason") or "none"
+                    ),
+                    "Madp-Transport": str(committed_evidence.get("transport")),
+                    "Madp-Provider": str(committed_evidence.get("provider")),
+                    "Madp-Model": str(committed_evidence.get("model")),
+                    "Madp-Session": str(committed_evidence.get("session_id")),
+                    "Madp-Completed-Via": str(entry.get("completed_via")),
+                    "Madp-Artifact-Sha256": str(entry.get("artifact_sha256")),
+                    "Madp-Evidence-Sha256": str(entry.get("evidence_sha256")),
+                }
+                legacy_optional: set[str] = set()
+                if position < len(definition.schedule):
+                    spec = definition.schedule[position]
+                    is_substitute = entry.get("actor_id") != spec.actor_id
+                    if not is_substitute and not spec.substitute_actor_ids:
+                        legacy_field_map = {
+                            "Madp-Scheduled-Actor": "scheduled_actor_id",
+                            "Madp-Actor-Selection": "actor_selection",
+                            "Madp-Substitution-Reason": "substitution_reason",
+                        }
+                        legacy_optional = {
+                            trailer
+                            for trailer, state_field in legacy_field_map.items()
+                            if state_field not in entry
+                        }
+                errors.extend(
+                    commit_trailer_errors(
+                        root,
+                        commit,
+                        expected_trailers,
+                        f"turn {round_id}",
+                        legacy_optional,
+                    )
+                )
+            else:
+                # Even malformed committed data must not create an unchecked
+                # trailer namespace. With no trustworthy values, every Madp-*
+                # key is unexpected and the structural errors above still name
+                # the missing state/evidence source.
+                errors.extend(
+                    commit_trailer_errors(root, commit, {}, f"turn {round_id}")
+                )
             if previous is not None and (
                 commit == previous or not gitops.is_ancestor(root, previous, commit)
             ):
                 errors.append(
                     f"turn {round_id}: commit order does not match the schedule"
                 )
+            proven_entry = entry if isinstance(entry, dict) else record
             turn_commits.append(
                 {
                     "round_id": round_id,
-                    "actor_id": record.get("actor_id"),
+                    "actor_id": proven_entry.get("actor_id"),
+                    "scheduled_actor_id": proven_entry.get("scheduled_actor_id"),
+                    "actor_selection": proven_entry.get("actor_selection"),
+                    "substitution_reason": proven_entry.get("substitution_reason"),
                     "commit": commit,
                     # The Git-proven provenance value (from the committed
                     # state at the original turn commit), never the current
@@ -1119,6 +1544,41 @@ class Dialogue:
                     errors.append(
                         "the owner-decision commit does not record "
                         "OWNER_DECIDED state"
+                    )
+                committed_decision = (committed_state or {}).get("owner_decision")
+                if not isinstance(committed_decision, dict):
+                    errors.append(
+                        "the owner-decision commit has no owner_decision record"
+                    )
+                    errors.extend(
+                        commit_trailer_errors(
+                            root, decision_commit, {}, "owner-decision commit"
+                        )
+                    )
+                else:
+                    if committed_decision != decision:
+                        errors.append(
+                            "the owner-decision commit record does not exactly "
+                            "match the current terminal state"
+                        )
+                    expected_decision_trailers = {
+                        "Madp-Protocol": definition.protocol_id,
+                        "Madp-Event": "owner-decision",
+                        "Madp-Decision": str(committed_decision.get("decision")),
+                        "Madp-Artifact-Sha256": str(
+                            committed_decision.get("artifact_sha256")
+                        ),
+                        "Madp-Caller-Identity": str(
+                            committed_decision.get("caller_identity")
+                        ),
+                    }
+                    errors.extend(
+                        commit_trailer_errors(
+                            root,
+                            decision_commit,
+                            expected_decision_trailers,
+                            "owner-decision commit",
+                        )
                     )
                 provenance["owner_decision_commit"] = decision_commit
 

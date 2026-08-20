@@ -52,7 +52,7 @@ madp_example_assert_wrong_actor() {
   local work_dir="$DIALOGUE/work"
   local marker="$work_dir/wrong-actor-spawn-marker"
   local output="$work_dir/wrong-actor-output.txt"
-  local expected_error="'$wrong_actor' is not the scheduled actor for $round_id; next actor is '$expected_actor'"
+  local expected_error="'$wrong_actor' is not an allowed actor for $round_id; primary actor is '$expected_actor'"
   local state_before
   local state_after
 

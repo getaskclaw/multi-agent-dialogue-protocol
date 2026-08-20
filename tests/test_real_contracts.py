@@ -1528,6 +1528,48 @@ class CapabilityGateTests(HermesTestCase):
         self.assertFalse(self.marker.exists())
         self.assertEqual(dialogue.state()["turn_index"], 0)
 
+    def test_substitute_is_gated_on_its_own_cli(self) -> None:
+        # A substitute actor is capability-gated on ITS OWN probed CLI,
+        # never on the primary's.
+        stub = self.base / "hermes-sub-no-source"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "stub-hermes 1.0"; exit 0; fi\n'
+            'if [ "$1" = "chat" ] && [ "$2" = "--help" ]; then\n'
+            '    echo "usage: hermes chat [-h] [-q QUERY] [-Q]"\n'
+            "    exit 0\n"
+            "fi\n"
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        raw = self.definition_raw()
+        sub_settings = self.hermes_settings("homes/sub")
+        sub_settings["command_name"] = str(stub)
+        raw["actors"].append(
+            {
+                "actor_id": "hermes-sub",
+                "role": "proposer",
+                "transport": "hermes-cli",
+                "expected_provider": "nousresearch",
+                "expected_model": "hermes-4-405b",
+                "settings": sub_settings,
+                "required_capabilities": ["one-shot-source-tagging"],
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["hermes-sub"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        definition = config.parse_definition(raw)
+        dialogue = engine.init_dialogue(definition, self.base / "dialogue-sub")
+        with self.assertRaisesRegex(engine.ProtocolError, "capabilities"):
+            runner.launch(
+                dialogue, "hermes-sub",
+                substitution_reason="provider_cooldown",
+            )
+        self.assertFalse(self.marker.exists(), "no runtime process may spawn")
+        self.assertIsNone(dialogue.state()["claim"])
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

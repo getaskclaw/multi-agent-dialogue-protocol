@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,46 @@ KNOWN_CAPABILITIES = (
 )
 
 DEFAULT_OWNER_DECISIONS = ("APPROVE", "REJECT", "NEED_MORE_EVIDENCE")
+SUBSTITUTION_REASON_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+AGENT_STATUS_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+_ROOT_KEYS = {
+    "protocol_id",
+    "version",
+    "owner",
+    "source_sha",
+    "evidence_roots",
+    "owner_decisions",
+    "agent_final_statuses",
+    "owner_proof_argv",
+    "evidence_versions",
+    "actors",
+    "schedule",
+    "final_round_id",
+    "continuation",
+}
+_CONTINUATION_KEYS = {
+    "protocol_id",
+    "round_id",
+    "artifact_path",
+    "artifact_sha256",
+    "published_commit",
+    "original_dialogue_head",
+    "start_round",
+}
+
+
+def static_hermes_home_key(actor: "Actor") -> tuple[bool, str] | None:
+    """Best-effort profile identity available before a dialogue path exists."""
+    if actor.transport != "hermes-cli":
+        return None
+    value = actor.settings.get("hermes_home")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value)
+    return path.is_absolute(), os.path.normpath(value)
 
 _ACTOR_KEYS = {
     "actor_id",
@@ -46,7 +88,15 @@ _ACTOR_KEYS = {
     "settings",
     "required_capabilities",
 }
-_TURN_KEYS = {"round_id", "actor_id", "purpose", "artifact_kind", "word_limit"}
+_TURN_KEYS = {
+    "round_id",
+    "actor_id",
+    "substitute_actor_ids",
+    "substitution_reasons",
+    "purpose",
+    "artifact_kind",
+    "word_limit",
+}
 
 
 class ConfigError(ValueError):
@@ -73,6 +123,26 @@ class TurnSpec:
     purpose: str
     artifact_kind: str
     word_limit: int | None = None
+    # Ordered alternatives preauthorized by the frozen definition.json.
+    # ``actor_id`` remains the primary scheduled actor; a substitute never
+    # inherits that identity and is recorded under its own actor_id.
+    substitute_actor_ids: tuple[str, ...] = ()
+    substitution_reasons: tuple[str, ...] = ()
+
+    @property
+    def allowed_actor_ids(self) -> tuple[str, ...]:
+        return (self.actor_id, *self.substitute_actor_ids)
+
+
+@dataclass(frozen=True)
+class ContinuationAnchor:
+    protocol_id: str
+    round_id: str
+    artifact_path: str
+    artifact_sha256: str
+    published_commit: str
+    original_dialogue_head: str
+    start_round: str
 
 
 @dataclass(frozen=True)
@@ -90,10 +160,12 @@ class ProtocolDefinition:
     # guaranteed ⊆ SUPPORTED_EVIDENCE_VERSIONS at parse time. A turn whose
     # evidence_version is outside this set fails closed.
     evidence_versions: tuple[int, ...] = SUPPORTED_EVIDENCE_VERSIONS
+    agent_final_statuses: tuple[str, ...] = ()
     # Optional external owner-proof verifier command. When empty, the
     # engine records the owner decision as caller-identity "unverified":
     # nothing authenticates WHO invoked owner-decide.
     owner_proof_argv: tuple[str, ...] = ()
+    continuation: ContinuationAnchor | None = None
     raw: dict[str, Any] = field(repr=False, compare=False, default_factory=dict)
 
     def actor(self, actor_id: str) -> Actor:
@@ -191,6 +263,51 @@ def _parse_turn(raw: Any, position: int, errors: list[str]) -> TurnSpec | None:
         )
     round_id = _require_str(raw, "round_id", where, errors)
     actor_id = _require_str(raw, "actor_id", where, errors)
+    substitutes_raw = raw.get("substitute_actor_ids", [])
+    if not isinstance(substitutes_raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in substitutes_raw
+    ):
+        errors.append(
+            f"{where}: substitute_actor_ids must be a list of non-empty actor IDs"
+        )
+        substitutes_raw = []
+    if actor_id and actor_id in substitutes_raw:
+        errors.append(
+            f"{where}: primary actor {actor_id!r} must not be repeated as a substitute"
+        )
+    if len(substitutes_raw) != len(set(substitutes_raw)):
+        errors.append(f"{where}: duplicate substitute actor IDs are not allowed")
+    reasons_raw = raw.get("substitution_reasons", [])
+    if not isinstance(reasons_raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in reasons_raw
+    ):
+        errors.append(
+            f"{where}: substitution_reasons must be a list of non-empty reason codes"
+        )
+        reasons_raw = []
+    if len(reasons_raw) != len(set(reasons_raw)):
+        errors.append(f"{where}: duplicate substitution reason codes are not allowed")
+    for reason in reasons_raw:
+        if not SUBSTITUTION_REASON_RE.fullmatch(reason):
+            errors.append(
+                f"{where}: {reason!r} is not a safe reason code; use 1-64 "
+                "lowercase letters, digits, underscores, or hyphens"
+            )
+        elif reason == "none":
+            # "none" is the null sentinel written to Madp-Substitution-
+            # Reason trailers; allowing it as a real code would collide.
+            errors.append(
+                f"{where}: 'none' is reserved as the null substitution "
+                "sentinel and cannot be a reason code"
+            )
+    if substitutes_raw and not reasons_raw:
+        errors.append(
+            f"{where}: substitution_reasons is required when substitute actors exist"
+        )
+    if reasons_raw and not substitutes_raw:
+        errors.append(
+            f"{where}: substitution_reasons requires substitute_actor_ids"
+        )
     purpose = _require_str(raw, "purpose", where, errors)
     artifact_kind = _require_str(raw, "artifact_kind", where, errors)
     word_limit = raw.get("word_limit")
@@ -203,7 +320,33 @@ def _parse_turn(raw: Any, position: int, errors: list[str]) -> TurnSpec | None:
         purpose=purpose,
         artifact_kind=artifact_kind,
         word_limit=word_limit,
+        substitute_actor_ids=tuple(substitutes_raw),
+        substitution_reasons=tuple(reasons_raw),
     )
+
+
+def _parse_continuation(raw: Any, errors: list[str]) -> ContinuationAnchor | None:
+    if raw is None:
+        return None
+    where = "definition.continuation"
+    if not isinstance(raw, dict):
+        errors.append(f"{where}: must be an object")
+        return None
+    unknown = set(raw) - _CONTINUATION_KEYS
+    if unknown:
+        errors.append(f"{where}: unknown keys: {sorted(unknown)}")
+    values = {key: _require_str(raw, key, where, errors) for key in _CONTINUATION_KEYS}
+    artifact_path = values["artifact_path"]
+    if artifact_path and not Path(artifact_path).is_absolute():
+        errors.append(f"{where}: artifact_path must be absolute")
+    if values["artifact_sha256"] and not SHA256_RE.fullmatch(
+        values["artifact_sha256"]
+    ):
+        errors.append(f"{where}: artifact_sha256 must be 64 lowercase hex characters")
+    for key in ("published_commit", "original_dialogue_head"):
+        if values[key] and not GIT_SHA_RE.fullmatch(values[key]):
+            errors.append(f"{where}: {key} must be a full 40-character Git SHA")
+    return ContinuationAnchor(**values)
 
 
 _SECRET_MARKERS = (
@@ -224,6 +367,9 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
     if not isinstance(raw, dict):
         raise ConfigError("protocol definition must be a JSON object")
     errors: list[str] = []
+    unknown_root = set(raw) - _ROOT_KEYS
+    if unknown_root:
+        errors.append(f"definition: unknown keys: {sorted(unknown_root)}")
 
     protocol_id = _require_str(raw, "protocol_id", "definition", errors)
     owner = _require_str(raw, "owner", "definition", errors)
@@ -252,6 +398,8 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
             "naming an external owner-proof verifier command"
         )
         owner_proof_raw = []
+
+    continuation = _parse_continuation(raw.get("continuation"), errors)
 
     decisions_raw = raw.get("owner_decisions", list(DEFAULT_OWNER_DECISIONS))
     if (
@@ -291,6 +439,25 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
         if len(set(versions_raw)) != len(versions_raw):
             errors.append("definition: evidence_versions contains duplicates")
 
+    agent_statuses_raw = raw.get("agent_final_statuses", [])
+    if not isinstance(agent_statuses_raw, list) or not all(
+        isinstance(item, str) and AGENT_STATUS_RE.fullmatch(item)
+        for item in agent_statuses_raw
+    ):
+        errors.append(
+            "definition: agent_final_statuses must be a list of uppercase "
+            "status tokens"
+        )
+        agent_statuses_raw = []
+    if len(agent_statuses_raw) != len(set(agent_statuses_raw)):
+        errors.append("definition: duplicate agent_final_statuses are not allowed")
+    overlap = set(agent_statuses_raw) & set(decisions_raw)
+    if overlap:
+        errors.append(
+            "definition: agent_final_statuses must not overlap owner_decisions: "
+            f"{sorted(overlap)}"
+        )
+
     actors_raw = raw.get("actors")
     actors: list[Actor] = []
     if not isinstance(actors_raw, list):
@@ -326,7 +493,8 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
             if turn is not None:
                 schedule.append(turn)
         seen_rounds: set[str] = set()
-        actor_ids = {actor.actor_id for actor in actors}
+        actors_by_id = {actor.actor_id: actor for actor in actors}
+        actor_ids = set(actors_by_id)
         for turn in schedule:
             if turn.round_id in seen_rounds:
                 errors.append(f"definition: duplicate round_id {turn.round_id!r}")
@@ -335,6 +503,30 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
                 errors.append(
                     f"definition: schedule references unknown actor {turn.actor_id!r}"
                 )
+            for substitute_id in turn.substitute_actor_ids:
+                if substitute_id not in actor_ids:
+                    errors.append(
+                        "definition: schedule references unknown substitute actor "
+                        f"{substitute_id!r} in {turn.round_id}"
+                    )
+                    continue
+                primary = actors_by_id.get(turn.actor_id)
+                substitute = actors_by_id[substitute_id]
+                if primary is not None and substitute.role != primary.role:
+                    errors.append(
+                        f"definition: substitute actor {substitute_id!r} role must "
+                        f"match primary actor {turn.actor_id!r} role {primary.role!r} "
+                        f"in {turn.round_id}"
+                    )
+                if primary is not None:
+                    primary_home = static_hermes_home_key(primary)
+                    substitute_home = static_hermes_home_key(substitute)
+                    if primary_home is not None and primary_home == substitute_home:
+                        errors.append(
+                            f"definition: substitute actor {substitute_id!r} must use "
+                            f"a distinct hermes_home from primary actor "
+                            f"{turn.actor_id!r} in {turn.round_id}"
+                        )
 
     final_round_id = raw.get("final_round_id")
     if not isinstance(final_round_id, str) or not final_round_id:
@@ -347,6 +539,12 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
             f"definition: final_round_id {final_round_id!r} must equal the last "
             f"scheduled round {schedule[-1].round_id!r}"
         )
+    if continuation is not None and schedule:
+        if continuation.start_round != schedule[0].round_id:
+            errors.append(
+                "definition.continuation: start_round must equal the first "
+                f"scheduled round {schedule[0].round_id!r}"
+            )
 
     if errors:
         raise ConfigError("invalid protocol definition:\n- " + "\n- ".join(errors))
@@ -362,7 +560,9 @@ def parse_definition(raw: Any) -> ProtocolDefinition:
         evidence_roots=tuple(evidence_roots_raw),
         owner_decisions=tuple(decisions_raw),
         evidence_versions=tuple(versions_raw),
+        agent_final_statuses=tuple(agent_statuses_raw),
         owner_proof_argv=tuple(owner_proof_raw),
+        continuation=continuation,
         # Snapshot so later caller mutations cannot change the digest.
         raw=json.loads(canonical_json(raw)),
     )

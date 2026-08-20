@@ -65,6 +65,113 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertEqual(adapters.adapter_for(actor).name, "command")
 
 
+class HermesSubstituteIsolationTests(unittest.TestCase):
+    def definition_with_homes(self, primary_home: Path, substitute_home: Path):
+        raw = support.two_actor_definition()
+        raw["actors"][1]["role"] = raw["actors"][0]["role"]
+        raw["actors"][0].update(
+            transport="hermes-cli",
+            settings={"command_name": "hermes", "hermes_home": str(primary_home)},
+        )
+        raw["actors"][1].update(
+            transport="hermes-cli",
+            settings={"command_name": "hermes", "hermes_home": str(substitute_home)},
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-b"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        return config.parse_definition(raw)
+
+    def test_init_rejects_symlinked_profile_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real_home = base / "profile-real"
+            real_home.mkdir()
+            alias_home = base / "profile-alias"
+            alias_home.symlink_to(real_home, target_is_directory=True)
+            definition = self.definition_with_homes(real_home, alias_home)
+            repo = support.init_git_repo(base / "repo")
+            with self.assertRaises(engine.ProtocolError) as ctx:
+                engine.init_dialogue(definition, repo / "dialogue")
+            self.assertIn("same HERMES_HOME", str(ctx.exception))
+
+    def test_engine_rechecks_alias_drift_at_validation_and_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            primary_home = base / "profile-primary"
+            substitute_home = base / "profile-substitute"
+            primary_home.mkdir()
+            substitute_home.mkdir()
+            definition = self.definition_with_homes(primary_home, substitute_home)
+            repo = support.init_git_repo(base / "repo")
+            dialogue = engine.init_dialogue(definition, repo / "dialogue")
+            substitute_home.rmdir()
+            substitute_home.symlink_to(primary_home, target_is_directory=True)
+            report = dialogue.validate()
+            self.assertFalse(report["ok"])
+            self.assertTrue(
+                any("same HERMES_HOME" in item for item in report["errors"]),
+                report["errors"],
+            )
+            with self.assertRaises(engine.ProtocolError):
+                dialogue.claim(
+                    "worker-b", substitution_reason="provider_cooldown"
+                )
+
+    def test_engine_rechecks_alias_drift_before_direct_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            primary_home = base / "profile-primary"
+            substitute_home = base / "profile-substitute"
+            primary_home.mkdir()
+            substitute_home.mkdir()
+            definition = self.definition_with_homes(primary_home, substitute_home)
+            repo = support.init_git_repo(base / "repo")
+            dialogue = engine.init_dialogue(definition, repo / "dialogue")
+            dialogue.claim("worker-b", substitution_reason="provider_cooldown")
+            substitute_home.rmdir()
+            substitute_home.symlink_to(primary_home, target_is_directory=True)
+            with self.assertRaises(engine.ProtocolError) as ctx:
+                dialogue.complete(
+                    "worker-b", base / "turn.md", base / "evidence.json"
+                )
+            self.assertIn("same HERMES_HOME", str(ctx.exception))
+
+    def test_engine_rechecks_alias_drift_before_primary_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            primary_home = base / "profile-primary"
+            substitute_home = base / "profile-substitute"
+            primary_home.mkdir()
+            substitute_home.mkdir()
+            definition = self.definition_with_homes(primary_home, substitute_home)
+            repo = support.init_git_repo(base / "repo")
+            dialogue = engine.init_dialogue(definition, repo / "dialogue")
+            substitute_home.rmdir()
+            substitute_home.symlink_to(primary_home, target_is_directory=True)
+            with self.assertRaises(engine.ProtocolError) as ctx:
+                dialogue.claim("worker-a")
+            self.assertIn("same HERMES_HOME", str(ctx.exception))
+
+    def test_engine_rechecks_alias_drift_before_primary_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            primary_home = base / "profile-primary"
+            substitute_home = base / "profile-substitute"
+            primary_home.mkdir()
+            substitute_home.mkdir()
+            definition = self.definition_with_homes(primary_home, substitute_home)
+            repo = support.init_git_repo(base / "repo")
+            dialogue = engine.init_dialogue(definition, repo / "dialogue")
+            dialogue.claim("worker-a")
+            substitute_home.rmdir()
+            substitute_home.symlink_to(primary_home, target_is_directory=True)
+            with self.assertRaises(engine.ProtocolError) as ctx:
+                dialogue.complete(
+                    "worker-a", base / "turn.md", base / "evidence.json"
+                )
+            self.assertIn("same HERMES_HOME", str(ctx.exception))
+
+
 class CommandAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -237,6 +344,88 @@ class DryRunTests(RunnerTestCase):
 
 
 class LaunchTests(RunnerTestCase):
+    def substitute_dialogue(self) -> engine.Dialogue:
+        raw = support.two_actor_definition()
+        for actor in raw["actors"]:
+            actor["settings"] = support.command_worker_settings(
+                self.marker, actor["expected_provider"], actor["expected_model"]
+            )
+        raw["actors"].append(
+            {
+                "actor_id": "worker-c",
+                "role": "proposer",
+                "transport": "command",
+                "expected_provider": "fake-provider-c",
+                "expected_model": "fake-model-c",
+                "settings": support.command_worker_settings(
+                    self.marker, "fake-provider-c", "fake-model-c"
+                ),
+            }
+        )
+        raw["schedule"][0]["substitute_actor_ids"] = ["worker-c"]
+        raw["schedule"][0]["substitution_reasons"] = ["provider_cooldown"]
+        definition = config.parse_definition(raw)
+        return engine.init_dialogue(definition, self.base / "dialogue-substitute")
+
+    def test_launch_preapproved_substitute_preserves_actual_identity(self) -> None:
+        dialogue = self.substitute_dialogue()
+        dry = runner.dry_run(
+            dialogue, "worker-c", substitution_reason="provider_cooldown"
+        )
+        self.assertEqual(dry["actor_id"], "worker-c")
+        self.assertEqual(dry["scheduled_actor_id"], "worker-a")
+        self.assertEqual(dry["actor_selection"], "substitute")
+        self.assertEqual(dry["substitution_reason"], "provider_cooldown")
+        prepared_path = self.base / "substitute-task.md"
+        prepared = runner.prepare(
+            dialogue,
+            "worker-c",
+            prepared_path,
+            substitution_reason="provider_cooldown",
+        )
+        self.assertEqual(prepared["substitution_reason"], "provider_cooldown")
+        self.assertIn(
+            "substitution_reason: provider_cooldown",
+            prepared_path.read_text(encoding="utf-8"),
+        )
+
+        result = runner.launch(
+            dialogue, "worker-c", substitution_reason="provider_cooldown"
+        )
+        self.assertEqual(result["actor_id"], "worker-c")
+        self.assertEqual(result["scheduled_actor_id"], "worker-a")
+        self.assertEqual(result["actor_selection"], "substitute")
+        record = dialogue.state()["completed_turns"][0]
+        self.assertEqual(record["actor_id"], "worker-c")
+        self.assertEqual(record["scheduled_actor_id"], "worker-a")
+        self.assertEqual(record["actor_selection"], "substitute")
+        self.assertEqual(record["substitution_reason"], "provider_cooldown")
+        self.assertEqual(record["artifact_file"], "turns/R01-worker-c.md")
+        runtime_record = json.loads(
+            (dialogue.directory / record["evidence_file"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(runtime_record["actor_id"], "worker-c")
+        self.assertEqual(runtime_record["scheduled_actor_id"], "worker-a")
+        self.assertEqual(runtime_record["actor_selection"], "substitute")
+        self.assertEqual(
+            runtime_record["substitution_reason"], "provider_cooldown"
+        )
+        task = dialogue.directory / "work" / "R01" / "task.md"
+        briefing = task.read_text(encoding="utf-8")
+        self.assertIn("actor_id: worker-c", briefing)
+        self.assertIn("scheduled_actor_id: worker-a", briefing)
+        self.assertIn("actor_selection: substitute", briefing)
+        self.assertIn("substitution_reason: provider_cooldown", briefing)
+        self.assertIn("never write as, claim to be, or impersonate", briefing)
+        report = dialogue.validate(
+            require_git=True, require_runner_completion=True
+        )
+        self.assertTrue(report["ok"], report["errors"])
+        proven = report["provenance"]["turn_commits"][0]
+        self.assertEqual(proven["actor_id"], "worker-c")
+        self.assertEqual(proven["scheduled_actor_id"], "worker-a")
+        self.assertEqual(proven["actor_selection"], "substitute")
+
     def test_launch_executes_exactly_one_turn(self) -> None:
         result = runner.launch(self.dialogue, "worker-a")
         self.assertTrue(result["executed"])
