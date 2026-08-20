@@ -17,8 +17,8 @@ from the ``sessions``, ``messages``, and ``session_model_usage`` tables
 — exactly one session with this turn's unique ``--source`` started
 inside the invocation window. The message boundary is proven too:
 every session row must sit inside the invocation window, the turn is
-the final ACTIVE text-bearing assistant message, and an active user
-row after it (a continued session) fails closed; the accepted
+the final ACTIVE text-bearing assistant message, and any active row
+after it (a continued session) fails closed; the accepted
 first/final message ids are recorded in the proof.
 
 Compatible Hermes session records may leave ``sessions.ended_at`` and
@@ -382,12 +382,12 @@ class HermesAdapter(Adapter):
             for msg_id, msg_role, _content, msg_ts, _active in message_rows:
                 try:
                     ts = float(msg_ts)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as exc:
                     raise AdapterError(
                         f"{where}: session {session_id} message id "
                         f"{msg_id} ({msg_role}) has no usable timestamp; "
                         "the message boundary is unproven"
-                    )
+                    ) from exc
                 if not (
                     started_before - WINDOW_SLACK_SECONDS
                     <= ts
@@ -405,8 +405,10 @@ class HermesAdapter(Adapter):
             # Interim active drafts before it (tool narration, superseded
             # text) are normal one-shot noise; an inactive tail row
             # (compaction ghost) is normal too. What is NOT acceptable:
-            # an active user row after it — the session continued with a
-            # new prompt, so "the turn" no longer bounds the exchange.
+            # ANY active row after it — a follow-up user prompt, a tool
+            # or system row, an empty assistant stub — because the session
+            # then continued past the answer and "the turn" no longer
+            # bounds the exchange.
             final_id = None
             final_text: str | None = None
             for msg_id, msg_role, content, _ts, active in message_rows:
@@ -422,17 +424,17 @@ class HermesAdapter(Adapter):
                     f"{where}: session {session_id} has no final active "
                     "assistant message; there is no turn to publish"
                 )
-            later_user = [
-                msg_id
+            later_active = [
+                (msg_id, msg_role)
                 for msg_id, msg_role, _c, _t, active in message_rows
-                if msg_role == "user" and active == 1 and msg_id > final_id
+                if active == 1 and msg_id > final_id
             ]
-            if later_user:
+            if later_active:
                 raise AdapterError(
-                    f"{where}: session {session_id} shows active user "
-                    f"message id(s) {later_user} after the final assistant "
-                    f"message id {final_id}; the session continued beyond "
-                    "this turn and the message boundary is unproven"
+                    f"{where}: session {session_id} shows active row(s) "
+                    f"{later_active} after the final assistant message id "
+                    f"{final_id}; the session continued beyond this turn "
+                    "and the message boundary is unproven"
                 )
             return {
                 "session_id": session_id,
@@ -444,13 +446,13 @@ class HermesAdapter(Adapter):
                 "api_call_count": api_calls,
                 "final_message": final_text,
                 # Message-boundary span recorded in the proof so review
-                # can see exactly which rows bounded the turn.
+                # can see exactly which rows bounded the turn. An empty
+                # session already failed the no-final-message check above,
+                # so message_rows is non-empty here.
                 "message_boundary": {
-                    "first_message_id": (
-                        message_rows[0][0] if message_rows else None
-                    ),
+                    "first_message_id": message_rows[0][0],
                     "final_message_id": final_id,
-                    "message_count": len(message_rows),
+                    "session_row_count": len(message_rows),
                 },
             }
         finally:

@@ -623,7 +623,7 @@ class HermesStateDbTests(HermesTestCase):
         proof = self.evidence_for(dialogue, 0)["proof"]
         boundary = proof["message_boundary"]
         # user prompt + interim draft + final + inactive ghost tail.
-        self.assertEqual(boundary["message_count"], 4)
+        self.assertEqual(boundary["session_row_count"], 4)
         self.assertLess(
             boundary["first_message_id"], boundary["final_message_id"]
         )
@@ -865,6 +865,23 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
         self.add_message_row("user", "follow-up prompt", self.before + 2.0)
         self.assert_refused("message boundary")
 
+    def test_active_tool_row_after_final_assistant_is_rejected(self) -> None:
+        # ANY active tail row — not just user prompts — breaks the
+        # boundary: the session continued past the answer.
+        self.build_db()
+        self.add_message_row("tool", "tool output", self.before + 2.0)
+        self.assert_refused("continued beyond this turn")
+
+    def test_inactive_tail_row_is_accepted(self) -> None:
+        # Compaction ghosts (inactive rows after the final message) are
+        # normal one-shot noise and stay accepted.
+        self.build_db()
+        self.add_message_row("assistant", "ghost", self.before + 2.0,
+                             active=0)
+        observed = self.observe()
+        self.assertEqual(observed["final_message"], "The final answer.")
+        self.assertEqual(observed["message_boundary"]["session_row_count"], 2)
+
     def test_message_without_usable_timestamp_is_rejected(self) -> None:
         self.build_db()
         # REAL affinity stores unconvertible text as-is; float() then
@@ -875,7 +892,7 @@ class HermesTerminalFieldMatrixTests(unittest.TestCase):
     def test_message_boundary_is_recorded(self) -> None:
         self.build_db()
         boundary = self.observe()["message_boundary"]
-        self.assertEqual(boundary["message_count"], 1)
+        self.assertEqual(boundary["session_row_count"], 1)
         self.assertEqual(
             boundary["first_message_id"], boundary["final_message_id"]
         )
