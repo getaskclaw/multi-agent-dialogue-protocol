@@ -52,6 +52,12 @@ class CommandAdapter(Adapter):
     name = "command"
     transport = "command"
 
+    def version_probe_argv(self, context: PrepareContext) -> list[str]:
+        settings = context.actor.settings
+        where = f"actor {context.actor.actor_id!r} (command)"
+        argv_setting = _argv_setting(settings, "argv", where, required=True)
+        return [argv_setting[0], "--version"]
+
     def prepare(self, context: PrepareContext) -> CommandPacket:
         settings = context.actor.settings
         where = f"actor {context.actor.actor_id!r} (command)"

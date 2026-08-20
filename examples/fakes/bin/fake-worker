@@ -21,6 +21,9 @@ import _fakelib  # noqa: E402
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="fake-worker")
+    parser.add_argument(
+        "--version", action="version", version="fake-worker 1.0.0 (fixture)"
+    )
     parser.add_argument("--task", required=True)
     parser.add_argument("--turn-output", required=True)
     parser.add_argument("--round", required=True)

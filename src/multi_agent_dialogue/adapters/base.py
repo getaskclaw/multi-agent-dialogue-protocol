@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import artifacts
 from ..config import Actor, TurnSpec
 
 EVIDENCE_VERSION = 1
@@ -161,6 +162,12 @@ def command_failed(result: subprocess.CompletedProcess, what: str) -> AdapterErr
     return AdapterError(f"{what} exited {result.returncode}: {detail}")
 
 
+# Bounded probe for the adapter CLI's own version string. The README
+# warns that real adapters depend on the exact installed CLI versions,
+# so accepted-turn evidence records the probed version verbatim.
+VERSION_PROBE_TIMEOUT_SECONDS = 15
+
+
 class Adapter(ABC):
     name: str = "abstract"
     transport: str = ""
@@ -186,10 +193,48 @@ class Adapter(ABC):
             f"{context.turn_file}",
         )
 
+    def version_probe_argv(self, context: PrepareContext) -> list[str] | None:
+        """Argv that prints the adapter CLI's version, or None if unknown.
+
+        Engine-probed, never adapter self-report: the output of THIS
+        command is what lands in evidence.
+        """
+        return None
+
+    def cli_version_evidence(self, context: PrepareContext) -> dict | None:
+        """Probe the adapter CLI version for the evidence record.
+
+        Informational only: a failed probe is recorded, never fatal —
+        the turn's acceptance still rests on the identity evidence.
+        """
+        argv = self.version_probe_argv(context)
+        if argv is None:
+            return None
+        where = f"actor {context.actor.actor_id!r} ({self.name})"
+        try:
+            result = run_command(
+                argv, env={}, cwd=context.work_dir,
+                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+                what=f"{where}: version probe",
+            )
+        except AdapterError as exc:
+            return {"argv": list(argv), "error": str(exc)}
+        output = (result.stdout or result.stderr or "").strip()[:500]
+        record = {
+            "argv": list(argv),
+            "exit_status": result.returncode,
+            "output": output,
+            "output_sha256": artifacts.sha256_bytes(output.encode("utf-8")),
+            "probed_at": utc_now(),
+        }
+        if result.returncode != 0:
+            record["error"] = f"version probe exited {result.returncode}"
+        return record
+
     def base_evidence(self, context: PrepareContext, *, provider: str, model: str,
                       session_id: str, exit_status: int, artifact_sha256: str,
                       proof: dict) -> dict:
-        return {
+        record = {
             "evidence_version": EVIDENCE_VERSION,
             "actor_id": context.actor.actor_id,
             "round_id": context.turn.round_id,
@@ -205,6 +250,10 @@ class Adapter(ABC):
             "captured_at": utc_now(),
             "proof": proof,
         }
+        cli_version = self.cli_version_evidence(context)
+        if cli_version is not None:
+            record["cli_version"] = cli_version
+        return record
 
 
 def get_adapter(transport: str) -> Adapter:

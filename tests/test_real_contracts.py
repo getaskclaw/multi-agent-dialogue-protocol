@@ -36,7 +36,9 @@ examples/fakes/bin — no real Claude, Hermes, tmux, or network.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
 import tempfile
@@ -921,6 +923,142 @@ class CommandIdentityTests(unittest.TestCase):
             runner.launch(dialogue, "worker-a")
         self.assertIn("model", str(ctx.exception))
         self.assertEqual(dialogue.state()["turn_index"], 0)
+
+
+class CliVersionEvidenceTests(HermesTestCase):
+    """Accepted-turn evidence records the engine-probed adapter CLI
+    version (verbatim output + hash) — the README ties adapter behavior
+    to the exact installed CLI versions, so the record must name them."""
+
+    def _version_stub(self, name: str, version_line: str,
+                      fail: bool = False) -> str:
+        stub = self.base / name
+        if fail:
+            body = (
+                "#!/bin/sh\n"
+                'if [ "$1" = "--version" ]; then exit 1; fi\n'
+                f'exec "{HERMES}" "$@"\n'
+            )
+        else:
+            body = (
+                "#!/bin/sh\n"
+                'if [ "$1" = "--version" ]; then\n'
+                f'    echo "{version_line}"\n'
+                "    exit 0\n"
+                "fi\n"
+                f'exec "{HERMES}" "$@"\n'
+            )
+        stub.write_text(body, encoding="utf-8")
+        os.chmod(stub, 0o755)
+        return str(stub)
+
+    def _dialogue_with_command(self, command_name: str,
+                               directory: str) -> engine.Dialogue:
+        raw = self.definition_raw()
+        raw["actors"][0]["settings"]["command_name"] = command_name
+        definition = config.parse_definition(raw)
+        return engine.init_dialogue(definition, self.base / directory)
+
+    def test_hermes_turn_records_probed_cli_version(self) -> None:
+        dialogue = self.make_dialogue()
+        runner.launch(dialogue, "hermes-north")
+        cli = self.evidence_for(dialogue, 0)["cli_version"]
+        self.assertEqual(cli["argv"], [HERMES, "--version"])
+        self.assertEqual(cli["exit_status"], 0)
+        self.assertEqual(cli["output"], "fake-hermes 1.1.0 (fixture)")
+        self.assertEqual(
+            cli["output_sha256"],
+            hashlib.sha256(cli["output"].encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn("error", cli)
+
+    def test_two_cli_versions_produce_distinct_evidence(self) -> None:
+        # The canary shape: same turn under two stubbed CLI versions
+        # yields different version records; both turns still validate.
+        stub_a = self._version_stub("hermes-a", "fake-hermes 1.0.0 (canary-a)")
+        stub_b = self._version_stub("hermes-b", "fake-hermes 2.0.0 (canary-b)")
+        dialogue_a = self._dialogue_with_command(stub_a, "dialogue-a")
+        dialogue_b = self._dialogue_with_command(stub_b, "dialogue-b")
+        runner.launch(dialogue_a, "hermes-north")
+        runner.launch(dialogue_b, "hermes-north")
+        out_a = self.evidence_for(dialogue_a, 0)["cli_version"]["output"]
+        out_b = self.evidence_for(dialogue_b, 0)["cli_version"]["output"]
+        self.assertEqual(out_a, "fake-hermes 1.0.0 (canary-a)")
+        self.assertEqual(out_b, "fake-hermes 2.0.0 (canary-b)")
+        self.assertNotEqual(out_a, out_b)
+        self.assertEqual(dialogue_a.state()["turn_index"], 1)
+        self.assertEqual(dialogue_b.state()["turn_index"], 1)
+
+    def test_failed_probe_is_recorded_not_fatal(self) -> None:
+        stub = self._version_stub("hermes-broken-version", "", fail=True)
+        dialogue = self._dialogue_with_command(stub, "dialogue-broken")
+        runner.launch(dialogue, "hermes-north")
+        cli = self.evidence_for(dialogue, 0)["cli_version"]
+        self.assertIn("error", cli)
+        self.assertEqual(cli["exit_status"], 1)
+        self.assertEqual(dialogue.state()["turn_index"], 1)
+
+
+class FableCliVersionTests(FableTestCase):
+    def test_fable_turn_records_probed_cli_version(self) -> None:
+        dialogue = self.make_dialogue()
+        runner.launch(dialogue, "fable-a")
+        record = dialogue.state()["completed_turns"][0]
+        evidence_record = json.loads(
+            (dialogue.directory / record["evidence_file"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        cli = evidence_record["cli_version"]
+        self.assertEqual(cli["argv"], [FABLE, "--version"])
+        self.assertEqual(cli["exit_status"], 0)
+        self.assertEqual(cli["output"], "fake-fable-session 0.3.0b1 (fixture)")
+
+
+class CommandCliVersionTests(CommandIdentityTests):
+    def _settings(self, argv0: str) -> dict:
+        argv = [argv0, *self.worker_argv()[1:]]
+        return {
+            "argv": argv,
+            "identity_verifier_argv": self.verifier_argv(),
+            "env": {
+                "FAKE_PROVIDER": "fake-provider-a",
+                "FAKE_MODEL": "fake-model-a",
+                "FAKE_SPAWN_MARKER": str(self.marker),
+            },
+        }
+
+    def _read_evidence(self, dialogue: engine.Dialogue) -> dict:
+        record = dialogue.state()["completed_turns"][0]
+        return json.loads(
+            (dialogue.directory / record["evidence_file"]).read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_worker_version_recorded(self) -> None:
+        dialogue = self.make_dialogue(self._settings(WORKER))
+        runner.launch(dialogue, "worker-a")
+        cli = self._read_evidence(dialogue)["cli_version"]
+        self.assertEqual(cli["argv"], [WORKER, "--version"])
+        self.assertEqual(cli["exit_status"], 0)
+        self.assertEqual(cli["output"], "fake-worker 1.0.0 (fixture)")
+
+    def test_worker_without_version_flag_is_recorded_not_fatal(self) -> None:
+        wrapper = self.base / "worker-no-version"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then exit 1; fi\n'
+            f'exec "{WORKER}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(wrapper, 0o755)
+        dialogue = self.make_dialogue(self._settings(str(wrapper)))
+        runner.launch(dialogue, "worker-a")
+        cli = self._read_evidence(dialogue)["cli_version"]
+        self.assertIn("error", cli)
+        self.assertEqual(cli["exit_status"], 1)
+        self.assertEqual(dialogue.state()["turn_index"], 1)
 
 
 if __name__ == "__main__":

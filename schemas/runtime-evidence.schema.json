@@ -22,13 +22,28 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "evidence_version": {"const": 1},
-    "actor_id": {"type": "string", "minLength": 1},
-    "round_id": {"type": "string", "minLength": 1},
-    "adapter": {"type": "string", "minLength": 1},
+    "evidence_version": {
+      "const": 1
+    },
+    "actor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "round_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapter": {
+      "type": "string",
+      "minLength": 1
+    },
     "transport": {
       "type": "string",
-      "enum": ["command", "fable-session", "hermes-cli"]
+      "enum": [
+        "command",
+        "fable-session",
+        "hermes-cli"
+      ]
     },
     "provider": {
       "type": "string",
@@ -47,12 +62,25 @@
     },
     "outcome": {
       "type": "string",
-      "enum": ["success", "failure", "timeout", "cancelled"],
+      "enum": [
+        "success",
+        "failure",
+        "timeout",
+        "cancelled"
+      ],
       "description": "Terminal outcome; anything other than success blocks completion."
     },
-    "exit_status": {"type": "integer"},
-    "artifact_path": {"type": "string", "minLength": 1},
-    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "exit_status": {
+      "type": "integer"
+    },
+    "artifact_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "captured_at": {
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
@@ -60,7 +88,9 @@
     },
     "proof": {
       "type": "object",
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "minProperties": 1,
       "description": "Adapter-derived proof references from EXTERNAL records — never worker-authored. kind names the record family; the remaining keys point at the backing records (manifest/audit/stream for fable-session, state.db facts for hermes-cli, the verifier report for command).",
       "properties": {
@@ -68,6 +98,21 @@
           "type": "string",
           "minLength": 1,
           "description": "External record family, e.g. fable-session, hermes-state-db, external-command-verifier."
+        }
+      }
+    },
+    "cli_version": {
+      "type": "object",
+      "description": "Engine-probed adapter CLI version record: argv, exit_status, verbatim output (truncated), output_sha256, probed_at; an 'error' key appears instead of output fields when the probe itself failed. Informational provenance only — never part of turn acceptance.",
+      "required": [
+        "argv"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     }
@@ -89,9 +134,21 @@
       "captured_at": "2026-07-16T00:00:00Z",
       "proof": {
         "kind": "external-command-verifier",
-        "worker_argv": ["fake-worker", "--task", "task.md"],
-        "verifier_argv": ["fake-verifier", "--turn", "turn.md"],
-        "report": {"fake": true, "provider": "provider-a", "model": "model-a"}
+        "worker_argv": [
+          "fake-worker",
+          "--task",
+          "task.md"
+        ],
+        "verifier_argv": [
+          "fake-verifier",
+          "--turn",
+          "turn.md"
+        ],
+        "report": {
+          "fake": true,
+          "provider": "provider-a",
+          "model": "model-a"
+        }
       }
     }
   ]
