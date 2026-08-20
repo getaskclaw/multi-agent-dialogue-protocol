@@ -7,13 +7,18 @@ is never identity proof. Evidence comes from the separately configured
 external verifier (see fake-verifier).
 
 Usage: fake-worker --task T --turn-output O --round R --actor A
+
+Extra knob: FAKE_SLEEP_SECONDS — sleep that long after the spawn mark,
+before writing the turn (crash/kill-forensics fixtures).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,6 +37,10 @@ if __name__ == "__main__":
 
     _fakelib.mark_spawn("worker")
     _fakelib.forced_exit()
+
+    sleep = float(os.environ.get("FAKE_SLEEP_SECONDS", "0") or 0)
+    if sleep > 0:
+        time.sleep(sleep)
 
     seed_value = _fakelib.seed(args.actor, args.round)
     turn_text = (

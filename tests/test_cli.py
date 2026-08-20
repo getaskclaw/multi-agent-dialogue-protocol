@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -65,6 +67,11 @@ class CliTestCase(unittest.TestCase):
             return 0
         lines = self.marker.read_text(encoding="utf-8").splitlines()
         return sum(1 for line in lines if line == "worker")
+
+    def run_all_turns(self) -> None:
+        for actor in ("worker-a", "worker-b", "worker-a", "worker-b"):
+            result = run_cli("run", str(self.dialogue_dir), "--actor", actor, "--launch")
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class InitStatusNextTests(CliTestCase):
@@ -214,11 +221,6 @@ class CompleteTests(CliTestCase):
 
 
 class ValidateAndOwnerTests(CliTestCase):
-    def run_all_turns(self) -> None:
-        for actor in ("worker-a", "worker-b", "worker-a", "worker-b"):
-            result = run_cli("run", str(self.dialogue_dir), "--actor", actor, "--launch")
-            self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_validate_clean_and_tampered(self) -> None:
         self.init()
         self.run_all_turns()
@@ -357,6 +359,101 @@ class CanaryTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("never guesses identity", result.stderr)
+
+
+class ReportCliTests(CliTestCase):
+    def test_report_command_indexes_the_ledger(self) -> None:
+        self.init()
+        self.run_all_turns()
+        result = run_cli("report", str(self.dialogue_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"], payload["mismatches"])
+        self.assertEqual(payload["turn_count"], 4)
+        self.assertTrue(payload["derived"])
+        for row in payload["turns"]:
+            self.assertTrue(row["artifact_digest_ok"])
+            self.assertTrue(row["evidence_digest_ok"])
+
+    def test_report_flags_tamper_with_nonzero_exit(self) -> None:
+        self.init()
+        self.run_all_turns()
+        state = json.loads(
+            (self.dialogue_dir / "state.json").read_text(encoding="utf-8")
+        )
+        target = self.dialogue_dir / state["completed_turns"][1]["artifact_file"]
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write("\ntampered\n")
+        result = run_cli("report", str(self.dialogue_dir))
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["mismatches"])
+
+
+class KillReceiptCliTests(CliTestCase):
+    """Kill canary: a launch killed mid-turn leaves an in-flight receipt
+    in the recovery namespace and an untouched ledger."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for actor in self.raw["actors"]:
+            actor["settings"].setdefault("env", {})["FAKE_SLEEP_SECONDS"] = "30"
+        self.definition_path.write_text(
+            json.dumps(self.raw), encoding="utf-8"
+        )
+
+    def test_killed_mid_turn(self) -> None:
+        self.init()
+        env = dict(os.environ)
+        env["PYTHONPATH"] = (
+            str(support.SRC) + os.pathsep + env.get("PYTHONPATH", "")
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "multi_agent_dialogue", "run",
+             str(self.dialogue_dir), "--actor", "worker-a", "--launch"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env, cwd=support.REPO_ROOT,
+            start_new_session=True,
+        )
+        receipt_dir = self.dialogue_dir / "work" / "run-attempts"
+        receipt_path = None
+        try:
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                found = (
+                    sorted(receipt_dir.glob("*.json"))
+                    if receipt_dir.is_dir()
+                    else []
+                )
+                if found:
+                    receipt_path = found[0]
+                    break
+                time.sleep(0.2)
+            self.assertIsNotNone(
+                receipt_path, "the in-flight receipt was never written"
+            )
+        finally:
+            # Kill the whole process group: proc.kill() alone would
+            # orphan the sleeping fake-worker child for up to 30s.
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["outcome"], "in_flight")
+        self.assertIsNone(receipt["finalized_at"])
+        self.assertEqual(receipt["cleanup"], "pending")
+        # The ledger never saw the turn: no completion, no turn commit.
+        state = json.loads(
+            (self.dialogue_dir / "state.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["completed_turns"], [])
+        self.assertEqual(state["turn_index"], 0)
+        commits = subprocess.run(
+            ["git", "-C", str(self.dialogue_dir),
+             "rev-list", "--count", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(commits, "1", "only the init commit exists")
 
 
 if __name__ == "__main__":
