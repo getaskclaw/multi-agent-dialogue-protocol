@@ -157,13 +157,15 @@
                   "argv": {"type": "array", "items": {"type": "string"}},
                   "exit_status": {"type": "integer"},
                   "output": {"type": "string"},
-                  "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  "output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "output_truncated": {"type": "boolean"}
                 }
               }
             }
           }
         },
-        "probed_at": {"type": "string"}
+        "probed_at": {"type": "string"},
+        "hook_error": {"type": "string"}
       }
     }
   },

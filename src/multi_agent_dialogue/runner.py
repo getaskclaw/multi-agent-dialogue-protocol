@@ -19,6 +19,7 @@ shape serves every transport.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import secrets
@@ -283,7 +284,10 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
     # before any claim or runtime spawn.
     required = context.actor.required_capabilities
     if required:
-        manifest = adapter.probe_capabilities(context)
+        try:
+            manifest = adapter.probe_capabilities(context)
+        except adapters.AdapterError as exc:
+            raise engine.ProtocolError(str(exc)) from exc
         missing = [
             name
             for name in required
@@ -295,6 +299,8 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
                 f"does not show: {missing}; launch refused before any "
                 "runtime spawn"
             )
+        # The evidence must record exactly what gated the launch.
+        context = dataclasses.replace(context, capability_manifest=manifest)
 
     dialogue.claim(actor_id)
     # Forensics are best-effort: a receipt that cannot be written must

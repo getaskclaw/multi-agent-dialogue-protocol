@@ -1487,6 +1487,30 @@ class CapabilityGateTests(HermesTestCase):
         self.assertIsNone(dialogue.state()["claim"])
         self.assertEqual(dialogue.state()["turn_index"], 0)
 
+    def test_lookalike_flags_do_not_satisfy_the_probe(self) -> None:
+        # --source-map must not satisfy --source; -q must not match
+        # --query/--quiet — the probe asserts exact flags.
+        stub = self.base / "hermes-lookalike-flags"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "stub-hermes 1.0"; exit 0; fi\n'
+            'if [ "$1" = "chat" ] && [ "$2" = "--help" ]; then\n'
+            '    echo "usage: hermes chat [-h] [-q QUERY] [--source-map FILE] '
+            '[--pass-session-id]"\n'
+            "    exit 0\n"
+            "fi\n"
+            f'exec "{HERMES}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        dialogue = self._dialogue_with_capabilities(
+            str(stub), ["one-shot-source-tagging"], "dialogue-lookalike"
+        )
+        with self.assertRaisesRegex(engine.ProtocolError, "capabilities"):
+            runner.launch(dialogue, "hermes-north")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(dialogue.state()["turn_index"], 0)
+
     def test_failing_version_probe_fails_the_gate(self) -> None:
         stub = self.base / "hermes-broken-version"
         stub.write_text(

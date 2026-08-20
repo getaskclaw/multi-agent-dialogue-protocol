@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,10 @@ class PrepareContext:
     task_file: Path
     turn_file: Path
     evidence_file: Path
+    # The manifest that gated this launch, when the actor declares
+    # required_capabilities; runner attaches it via dataclasses.replace
+    # so the evidence records exactly what gated — never a re-probe.
+    capability_manifest: dict | None = None
 
     def placeholders(self) -> dict[str, str]:
         return {
@@ -202,7 +207,7 @@ class Adapter(ABC):
 
     def capability_probes(
         self, context: PrepareContext
-    ) -> dict[str, tuple[list[str], "object"]]:
+    ) -> dict[str, tuple[list[str], Callable[[str, int], bool]]]:
         """Extra CLI capability probes: name -> (argv, check).
 
         ``check`` receives (full_output, returncode) and returns bool.
@@ -243,17 +248,18 @@ class Adapter(ABC):
                 "error": f"capability check failed: {exc}",
                 "probe": {"argv": list(argv)},
             }
-        return {
-            "ok": ok,
-            "probe": {
-                "argv": list(argv),
-                "exit_status": result.returncode,
-                "output": raw_output.strip()[:500],
-                "output_sha256": artifacts.sha256_bytes(
-                    raw_output.encode("utf-8")
-                ),
-            },
+        stripped = raw_output.strip()
+        probe_record: dict = {
+            "argv": list(argv),
+            "exit_status": result.returncode,
+            "output": stripped[:500],
+            # The hash attests the FULL probe output, computed before
+            # the 500-char storage truncation (cli_version parity).
+            "output_sha256": artifacts.sha256_bytes(raw_output.encode("utf-8")),
         }
+        if len(stripped) > 500:
+            probe_record["output_truncated"] = True
+        return {"ok": ok, "probe": probe_record}
 
     def probe_capabilities(self, context: PrepareContext) -> dict:
         """Build the capability manifest by probing the CLI itself.
@@ -275,11 +281,26 @@ class Adapter(ABC):
                     context,
                     where,
                 )
-        for name, (argv, check) in self.capability_probes(context).items():
+        try:
+            extra_probes = self.capability_probes(context)
+        except AdapterError as exc:
+            # A broken hook must not crash the gate: its capabilities
+            # simply never show up as ok, and the error is recorded.
+            extra_probes = {}
+            hook_error = str(exc)
+        else:
+            hook_error = None
+        for name, (argv, check) in extra_probes.items():
             capabilities[name] = self._run_capability_probe(
                 argv, check, context, where
             )
-        return {"capabilities": capabilities, "probed_at": utc_now()}
+        manifest: dict = {
+            "capabilities": capabilities,
+            "probed_at": utc_now(),
+        }
+        if hook_error is not None:
+            manifest["hook_error"] = hook_error
+        return manifest
 
     def cli_version_evidence(self, context: PrepareContext) -> dict | None:
         """Probe the adapter CLI version for the evidence record.
@@ -352,10 +373,13 @@ class Adapter(ABC):
         if cli_version is not None:
             record["cli_version"] = cli_version
         if context.actor.required_capabilities:
-            # The manifest is probed from the CLI at execution time and
-            # rides inside the hashed evidence record; the pre-launch
-            # gate probed the same surface before any spawn.
-            record["capability_manifest"] = self.probe_capabilities(context)
+            # The evidence records the SAME manifest that gated the
+            # launch (attached to the context by the runner); a fresh
+            # probe only happens if execute ran without the gate.
+            manifest = context.capability_manifest
+            if manifest is None:
+                manifest = self.probe_capabilities(context)
+            record["capability_manifest"] = manifest
         return record
 
 

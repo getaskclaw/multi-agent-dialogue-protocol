@@ -237,6 +237,29 @@ class EvidenceVersionsDefinitionTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "duplicates"):
             config.parse_definition(raw)
 
+    def test_schema_capability_enums_match_config_vocabulary(self) -> None:
+        # The controlled vocabulary lives in config.KNOWN_CAPABILITIES;
+        # both schema enums must derive from it, never drift.
+        proto = json.loads(
+            (support.REPO_ROOT / "schemas" / "protocol.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        actor_props = proto["properties"]["actors"]["items"]["properties"]
+        schema_caps = actor_props["required_capabilities"]["items"]["enum"]
+        self.assertEqual(
+            sorted(schema_caps), sorted(config.KNOWN_CAPABILITIES)
+        )
+        ev_schema = json.loads(
+            (support.REPO_ROOT / "schemas" / "runtime-evidence.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        ev_caps = ev_schema["properties"]["capability_manifest"]["properties"][
+            "capabilities"
+        ]["propertyNames"]["enum"]
+        self.assertEqual(sorted(ev_caps), sorted(config.KNOWN_CAPABILITIES))
+
 
 class RequiredCapabilitiesDefinitionTests(unittest.TestCase):
     """Actor required_capabilities use the controlled vocabulary only."""
