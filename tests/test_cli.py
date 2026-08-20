@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,11 @@ class CliTestCase(unittest.TestCase):
             return 0
         lines = self.marker.read_text(encoding="utf-8").splitlines()
         return sum(1 for line in lines if line == "worker")
+
+    def run_all_turns(self) -> None:
+        for actor in ("worker-a", "worker-b", "worker-a", "worker-b"):
+            result = run_cli("run", str(self.dialogue_dir), "--actor", actor, "--launch")
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class InitStatusNextTests(CliTestCase):
@@ -215,11 +221,6 @@ class CompleteTests(CliTestCase):
 
 
 class ValidateAndOwnerTests(CliTestCase):
-    def run_all_turns(self) -> None:
-        for actor in ("worker-a", "worker-b", "worker-a", "worker-b"):
-            result = run_cli("run", str(self.dialogue_dir), "--actor", actor, "--launch")
-            self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_validate_clean_and_tampered(self) -> None:
         self.init()
         self.run_all_turns()
@@ -360,7 +361,7 @@ class CanaryTests(unittest.TestCase):
         self.assertIn("never guesses identity", result.stderr)
 
 
-class ReportCliTests(ValidateAndOwnerTests):
+class ReportCliTests(CliTestCase):
     def test_report_command_indexes_the_ledger(self) -> None:
         self.init()
         self.run_all_turns()
@@ -413,6 +414,7 @@ class KillReceiptCliTests(CliTestCase):
              str(self.dialogue_dir), "--actor", "worker-a", "--launch"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=env, cwd=support.REPO_ROOT,
+            start_new_session=True,
         )
         receipt_dir = self.dialogue_dir / "work" / "run-attempts"
         receipt_path = None
@@ -432,8 +434,10 @@ class KillReceiptCliTests(CliTestCase):
                 receipt_path, "the in-flight receipt was never written"
             )
         finally:
-            proc.kill()
-            proc.wait()
+            # Kill the whole process group: proc.kill() alone would
+            # orphan the sleeping fake-worker child for up to 30s.
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt["outcome"], "in_flight")
         self.assertIsNone(receipt["finalized_at"])

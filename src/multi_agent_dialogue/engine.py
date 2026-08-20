@@ -825,10 +825,16 @@ class Dialogue:
                 ("evidence_file", "evidence_sha256", "evidence"),
             ):
                 recorded = record.get(sha_key)
-                try:
-                    actual = artifacts.sha256_file(
-                        self.directory / record[file_key]
+                rel_path = record.get(file_key)
+                if not isinstance(rel_path, str) or not rel_path:
+                    mismatches.append(
+                        f"turn {round_id}: state record has no usable "
+                        f"{file_key}"
                     )
+                    row[f"{label}_digest_ok"] = False
+                    continue
+                try:
+                    actual = artifacts.sha256_file(self.directory / rel_path)
                 except Exception as exc:  # read-only report must not crash
                     mismatches.append(
                         f"turn {round_id}: {label} unreadable: {exc}"
@@ -842,15 +848,26 @@ class Dialogue:
                         f"recorded {recorded!r}, file now hashes {actual!r}"
                     )
             # Index fields re-read from the raw evidence bytes.
+            evidence_rel = record.get("evidence_file")
+            if not isinstance(evidence_rel, str) or not evidence_rel:
+                row["evidence_index"] = None
+                rows.append(row)
+                continue
             try:
                 turn_evidence = evidence.load_evidence(
-                    self.directory / record["evidence_file"]
+                    self.directory / evidence_rel
                 )
             except evidence.EvidenceError as exc:
                 mismatches.append(f"turn {round_id}: evidence unreadable: {exc}")
                 row["evidence_index"] = None
             else:
-                cli_version = turn_evidence.get("cli_version") or None
+                cli_version = turn_evidence.get("cli_version")
+                if cli_version is not None and not isinstance(cli_version, dict):
+                    mismatches.append(
+                        f"turn {round_id}: cli_version is not an object "
+                        f"({cli_version!r:.80})"
+                    )
+                    cli_version = None
                 row["evidence_index"] = {
                     "evidence_version": turn_evidence.get("evidence_version"),
                     "adapter": turn_evidence.get("adapter"),

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,14 +82,17 @@ def _start_receipt(
         "cleanup": "pending",
         "detail": None,
     }
-    path = _receipt_path(context, f"{int(started * 1000):x}")
+    path = _receipt_path(
+        context,
+        f"{int(started * 1000):x}-{os.getpid():x}-{secrets.token_hex(2)}",
+    )
     _write_receipt(path, receipt)
     return path, receipt
 
 
 def _finalize_receipt(
-    path: Path,
-    receipt: dict,
+    path: Path | None,
+    receipt: dict | None,
     *,
     outcome: str,
     cleanup: str,
@@ -101,6 +105,8 @@ def _finalize_receipt(
     truthful "no outcome was recorded" signal — and must never mask the
     real outcome of the turn.
     """
+    if path is None or receipt is None:
+        return
     receipt.update(
         {
             "finalized_at": _utc_now(),
@@ -273,7 +279,14 @@ def launch(dialogue: engine.Dialogue, actor_id: str, timeout: int | None = None)
         raise engine.ProtocolError(str(exc)) from exc
 
     dialogue.claim(actor_id)
-    receipt_path, receipt = _start_receipt(context, packet)
+    # Forensics are best-effort: a receipt that cannot be written must
+    # never hold a claim hostage or block a turn the ledger can prove.
+    try:
+        receipt_path: Path | None
+        receipt: dict | None
+        receipt_path, receipt = _start_receipt(context, packet)
+    except Exception:
+        receipt_path, receipt = None, None
     try:
         context.work_dir.mkdir(parents=True, exist_ok=True)
         briefing = build_task_briefing(
