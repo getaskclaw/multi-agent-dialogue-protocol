@@ -158,7 +158,8 @@ class TopLevelNamespaceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             subcommands(result.stdout),
-            {"init", "status", "next", "run", "validate", "owner-decide"},
+            {"init", "status", "next", "run", "validate", "owner-decide",
+             "canary"},
             "top-level madp must expose exactly the public path "
             "(claim/prepare/complete are recovery-only)",
         )

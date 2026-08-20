@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import adapters, artifacts, config, engine, evidence, runner
+from . import adapters, artifacts, canary, config, engine, evidence, runner
 
 
 def _emit(payload: dict) -> None:
@@ -142,6 +142,18 @@ def cmd_owner_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_canary(args: argparse.Namespace) -> int:
+    report = canary.run_canary(
+        args.dialogue,
+        args.adapter,
+        command_name=args.command_name,
+        expected_provider=args.expected_provider,
+        expected_model=args.expected_model,
+    )
+    _emit(report)
+    return 0 if report["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="madp",
@@ -203,6 +215,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", required=True, type=Path)
     p.set_defaults(func=cmd_owner_decide)
 
+    p = sub.add_parser(
+        "canary",
+        help="run one turn through the real acceptance path in a fresh local "
+             "dialogue and validate it with the production gate",
+    )
+    p.add_argument("--adapter", required=True, choices=canary.CANARY_TRANSPORTS,
+                   help="transport to exercise; binaries default to the "
+                        "shipped fakes (MADP_FAKE_BIN overrides their location)")
+    p.add_argument("--dialogue", required=True, type=Path,
+                   help="fresh directory for the canary dialogue (must be empty)")
+    p.add_argument("--command-name", default=None,
+                   help="hermes-cli only: probe a REAL installed CLI instead of "
+                        "the fake; requires --expected-provider/--expected-model")
+    p.add_argument("--expected-provider", default=None)
+    p.add_argument("--expected-model", default=None)
+    p.add_argument("--no-push", action="store_true",
+                   help="accepted for explicitness: canaries are always "
+                        "local-only (the engine has no push capability)")
+    p.set_defaults(func=cmd_canary)
+
     return parser
 
 
@@ -212,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except (
+        canary.CanaryError,
         config.ConfigError,
         engine.ProtocolError,
         evidence.EvidenceError,
